@@ -140,7 +140,8 @@ final class Link {
     private volatile boolean audioConnecting;
     // The newest audio frame played (both links carry every frame): its stream, sequence number and when.
     private int audioId, audioSeq;
-    private long audioAt;
+    private volatile long audioAt;
+    private volatile long audioRetryAt; // when a fresh audio connection was last started over a stalled one
 
     private Link(Context ctx) {
         this.ctx = ctx;
@@ -547,7 +548,7 @@ final class Link {
                 c.close();
                 return null;
             }
-            s.setSoTimeout("control".equals(role) ? (int) NET_IDLE_MS : "audio".equals(role) ? 5000 : 60_000);
+            s.setSoTimeout("control".equals(role) ? (int) NET_IDLE_MS : "audio".equals(role) ? 1000 : 60_000);
             if ("control".equals(role)) {
                 Pairing.setLastAddr(ctx, addr);
                 Pairing.setName(ctx, r.h.optString("name"));
@@ -699,12 +700,18 @@ final class Link {
             return;
         }
         if (audio != null || audioConnecting || net == null) return;
+        openAudio();
+    }
+
+    private void openAudio() {
         audioConnecting = true;
         new Thread(() -> {
             Conn a = connectNet("audio", null);
             audioConnecting = false;
             if (a == null) return;
+            Conn old = audio;
             audio = a;
+            if (old != null) old.close(); // a stalled one this replaces (the computer drops it too)
             readAudio(a);
         }, "tandem-audio").start();
     }
@@ -716,10 +723,20 @@ final class Link {
                 try {
                     f = Proto.read(a.in);
                 } catch (SocketTimeoutException e) {
-                    // Nothing on this connection for 5 s: keep it. If Bluetooth brought nothing either, nothing
-                    // is playing on the laptop: let the player rest.
+                    long now = SystemClock.elapsedRealtime(), quiet = now - audioAt;
                     AudioSink s = audioSink;
-                    if (s != null && SystemClock.elapsedRealtime() - audioAt > 5000) s.onAudio(-1, null, 0, 0);
+                    // Nothing from either link for 5 s: nothing is playing on the laptop. Let the player rest.
+                    if (s != null && quiet > 5000) s.onAudio(-1, null, 0, 0);
+                    // The stream stopped mid-play: maybe the laptop paused, maybe the network stalled (Tailscale
+                    // moving between paths stops traffic for seconds). After a stall, TCP waits out its retry
+                    // backoff, seconds more of silence; a fresh connection plays as soon as the network is back.
+                    // A pause costs a few needless connections.
+                    if (s != null && quiet > 1500 && quiet < 30_000 && !audioConnecting && net != null
+                            && now - audioRetryAt > Math.max(2000, quiet / 3)) {
+                        audioRetryAt = now;
+                        Log.d(TAG, "audio: nothing for " + quiet + " ms, opening a fresh connection");
+                        openAudio();
+                    }
                     continue;
                 }
                 if ("a".equals(f.type())) audioFrame(f, a.via);

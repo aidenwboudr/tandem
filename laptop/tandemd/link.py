@@ -89,8 +89,12 @@ class Conn:
         self.closed = False
 
     def send(self, header, payload=b""):
+        data = encode(header, payload)
+        # One write for small frames: on Bluetooth every write is a packet, and audio sends 50 frames a second.
+        if payload and len(payload) <= 64 * 1024:
+            data, payload = data + payload, b""
         with self.lock:
-            self.sock.sendall(encode(header, payload))
+            self.sock.sendall(data)
             if payload:
                 self.sock.sendall(payload)
 
