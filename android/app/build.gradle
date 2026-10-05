@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing key lives outside the repo (see build.sh). Without it, release builds are unsigned.
+def ks = System.getenv("TANDEM_KEYSTORE") ?: "${System.getProperty('user.home')}/.config/tandem/android-release.jks"
+
+android {
+    namespace 'com.aidenwb.tandem'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.aidenwb.tandem'
+        minSdk 33
+        targetSdk 35
+        versionCode 8
+        versionName '3.0'
+    }
+
+    signingConfigs {
+        release {
+            storeFile file(ks)
+            storePassword System.getenv("TANDEM_KEYSTORE_PASS") ?: "tandem"
+            keyAlias "tandem"
+            keyPassword System.getenv("TANDEM_KEYSTORE_PASS") ?: "tandem"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (file(ks).exists()) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

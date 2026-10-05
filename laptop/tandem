@@ -1,0 +1,15 @@
+#!/usr/bin/python3
+"""tandem: your phone and your Linux computer, working as one. See `tandem help`."""
+import os
+import sys
+
+# Installed: ~/.local/lib/tandem/tandemd; from the repo: next to this file.
+here = os.path.dirname(os.path.realpath(__file__))
+for d in (here, os.path.expanduser("~/.local/lib/tandem")):
+    if os.path.isdir(os.path.join(d, "tandemd")):
+        sys.path.insert(0, d)
+        break
+
+from tandemd.cli import main  # noqa: E402
+
+main()

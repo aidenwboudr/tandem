@@ -1,0 +1,1457 @@
+#!/usr/bin/python3
+"""tandem-mixer: a hover mixer for waybar's audio module (replaces pavucontrol).
+
+Hover (or click) waybar's audio module and a mixer drops down under it:
+  OUTPUT  the default output's volume, and every output device (click one to switch to it)
+  APPS    every app playing on the laptop: volume per app, play/pause for media players (MPRIS)
+  MIC     the default input's volume
+  PHONE   while tandem links the phone: the phone's players (play/pause) + media volume,
+          or its Bluetooth stream when the laptop has the headphones
+Click any percentage to mute/unmute. Scrolling the bar module still changes volume (waybar).
+
+Waybar has no hover hook, so the waybar-hover CFFI module (waybar-hover.so) runs inside waybar,
+hooks the audio module's widget, and reports enter/leave/click + position over a unix socket.
+It also shows a small phone icon next to the volume while audio is shared with the phone.
+
+Usage: tandem-mixer                   run (user service)
+       tandem-mixer --setup-waybar    add the hover module to waybar, drop on-click pavucontrol
+       tandem-mixer --restore-waybar  undo --setup-waybar
+       tandem-mixer --toggle          open/close the mixer (for keybinds)
+       tandem-mixer --demo [--np]     fake data, always open (screenshots; --np: only the bar pill)
+"""
+import glob
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+# Started by systemd, which may not have sway's environment: find the compositor ourselves.
+if not os.environ.get("WAYLAND_DISPLAY"):
+    socks = sorted(glob.glob(os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "wayland-[0-9]")))
+    if socks:
+        os.environ["WAYLAND_DISPLAY"] = os.path.basename(socks[0])
+os.environ.setdefault("GDK_BACKEND", "wayland")
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+
+try:
+    gi.require_version("GtkLayerShell", "0.1")
+    from gi.repository import GtkLayerShell  # noqa: E402
+except (ValueError, ImportError):
+    GtkLayerShell = None
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+STATE = os.path.join(RUNTIME, "tandem.json")
+CTL = os.path.join(RUNTIME, "tandem.ctl")
+SOCK = os.path.join(RUNTIME, "tandem-mixer.sock")  # from waybar-hover.so
+INDICATOR = os.path.join(RUNTIME, "tandem-indicator")  # read by waybar-hover.so
+CONFIG = os.path.expanduser("~/.config/tandem/mixer.json")
+DEMO = "--demo" in sys.argv
+
+# Bar geometry (overridable in mixer.json; defaults = the rice SPEC / waybar config).
+GEOM = {"bar_margin_top": 4, "bar_margin_left": 6, "bar_height": 27, "gap": 6, "width": 400,
+        "audio_module": "pulseaudio", "indicator": "<span foreground='#8aadf4'>󰄜</span>",
+        "np_width": 420, "media_players": ["spotify"],
+        "ignore_apps": ["speech-dispatcher", "voxtype"]}
+
+WAYBAR_DIR = os.path.expanduser("~/.config/waybar")
+WAYBAR_CONFIG = os.path.join(WAYBAR_DIR, "config")
+WAYBAR_MODULES = os.path.join(WAYBAR_DIR, "modules.json")
+WAYBAR_STYLE = os.path.join(WAYBAR_DIR, "style.css")
+GEN = os.path.join(WAYBAR_DIR, "generated", "tandem.json")
+GEN_INCLUDE = "~/.config/waybar/generated/tandem.json"
+HOVER_SO = os.path.expanduser("~/.local/lib/tandem/waybar-hover.so")
+CFFI_NAME = "cffi/tandem"
+STYLE_START = "/* tandem:start */"
+STYLE_END = "/* tandem:end */"
+# Left behind by the earlier centered-module version; --setup-waybar cleans it up.
+OLD_LAYOUT = os.path.join(WAYBAR_DIR, "generated", "layout.json")
+OLD_LAYOUT_INCLUDE = "~/.config/waybar/generated/layout.json"
+OLD_STYLE_MARK = "/* momentum-share: audio module while it sits in the center */"
+# From before the rename to Tandem (it was momentum-share); --setup-waybar moves these over.
+LEGACY = "momentum-share"
+LEGACY_GEN = os.path.join(WAYBAR_DIR, "generated", LEGACY + ".json")
+LEGACY_INCLUDE = "~/.config/waybar/generated/" + LEGACY + ".json"
+LEGACY_ONCLICK = "// on-click: hover/click opens " + LEGACY + "-mixer"
+
+CSS = b"""
+* { font-family: "JetBrainsMono Nerd Font", monospace; font-size: 12px; }
+window { background: transparent; }
+.mixer { background: #24273a; border: 1px solid #363a4f; border-radius: 8px; padding: 12px 14px 10px; }
+.section { color: #8087a2; font-size: 10px; font-weight: bold; letter-spacing: 1px; }
+.where { color: #6e738d; font-size: 10px; }
+.app { color: #cad3f5; font-weight: bold; }
+.title { color: #a5adcb; }
+.pct { color: #8087a2; font-size: 10px; min-width: 36px; }
+.pct:hover { color: #cad3f5; }
+.sep { background: #363a4f; min-height: 1px; margin: 10px 0 8px; }
+.empty { color: #6e738d; font-style: italic; }
+button.pp { background: #363a4f; color: #cad3f5; border: none; border-radius: 6px; padding: 0 8px;
+            min-height: 22px; min-width: 22px; box-shadow: none; transition: background 150ms ease; }
+button.pp:hover { background: #8aadf4; color: #24273a; }
+button.pp.playing { color: #a6da95; }
+button.pp.playing:hover { color: #24273a; }
+button.dev { background: transparent; color: #a5adcb; border: none; border-radius: 6px; padding: 2px 8px;
+             box-shadow: none; min-height: 0; transition: background 150ms ease, color 150ms ease; }
+button.dev label { font-size: 11px; }
+button.dev:hover { background: #363a4f; color: #cad3f5; }
+button.dev.current { color: #8aadf4; }
+scale trough { background: #363a4f; min-height: 4px; border-radius: 2px; border: none; }
+scale highlight { background: #8aadf4; border-radius: 2px; border: none; }
+scale.master highlight { background: #b7bdf8; }
+scale slider { background: #cad3f5; min-width: 12px; min-height: 12px; border-radius: 6px;
+               border: none; box-shadow: none; margin: -4px; }
+scale slider:hover { background: #ffffff; }
+scale.muted highlight { background: #6e738d; }
+.hubrow { margin-bottom: 2px; }
+.seg { background: #1e2030; border-radius: 7px; padding: 2px; }
+button.seg-b { background: transparent; color: #8087a2; border: none; border-radius: 5px; padding: 1px 12px;
+               min-height: 0; box-shadow: none; transition: background 220ms ease, color 220ms ease; }
+button.seg-b label { font-size: 11px; }
+button.seg-b:hover { color: #cad3f5; }
+button.seg-b.on { background: #8aadf4; color: #24273a; }
+button.seg-b.pending { background: #363a4f; color: #cad3f5; }
+.hubnote { color: #6e738d; font-size: 10px; }
+"""
+
+
+# ---------------------------------------------------------------- data: laptop
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def pw_objects():
+    try:
+        return json.loads(run("pw-dump") or "[]")
+    except ValueError:
+        return []
+
+
+def node_volume(o):
+    """Volume as wpctl shows it (cubic, 0..1+) and mute, from a pw-dump node."""
+    for p in ((o.get("info") or {}).get("params") or {}).get("Props") or []:
+        vols = p.get("channelVolumes")
+        if vols:
+            lin = sum(vols) / len(vols)
+            return max(lin, 0) ** (1 / 3), bool(p.get("mute"))
+    return None, False
+
+
+class Mpris:
+    """MPRIS players on the session bus: identity, desktop entry, title, status."""
+
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+    def _call(self, name, path, iface, method, args=None, sig=None):
+        try:
+            return self.bus.call_sync(name, path, iface, method, args, sig, Gio.DBusCallFlags.NONE, 500, None)
+        except GLib.Error:
+            return None
+
+    def players(self):
+        r = self._call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames")
+        names = [n for n in (r.unpack()[0] if r else []) if n.startswith("org.mpris.MediaPlayer2.")]
+        out = []
+        for n in names:
+            root = self._getall(n, "org.mpris.MediaPlayer2")
+            pl = self._getall(n, "org.mpris.MediaPlayer2.Player")
+            md = pl.get("Metadata") or {}
+            artist = md.get("xesam:artist") or []
+            out.append({
+                "bus": n, "identity": root.get("Identity") or n.split(".")[-1],
+                "entry": (root.get("DesktopEntry") or "").lower(),
+                "title": md.get("xesam:title") or "", "artist": ", ".join(artist) if isinstance(artist, list) else str(artist),
+                "status": pl.get("PlaybackStatus") or "Stopped", "can_pause": pl.get("CanPause", True),
+                "art": md.get("mpris:artUrl") or "", "length": (md.get("mpris:length") or 0) / 1e6,
+                "position": (pl.get("Position") or 0) / 1e6, "album": md.get("xesam:album") or "",
+            })
+        return out
+
+    def _getall(self, name, iface):
+        r = self._call(name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "GetAll",
+                       GLib.Variant("(s)", (iface,)))
+        return r.unpack()[0] if r else {}
+
+    def play_pause(self, bus):
+        self._call(bus, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", "PlayPause")
+
+    def command(self, bus, method):  # Next / Previous / PlayPause
+        self._call(bus, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player", method)
+
+
+def norm(s):
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+IGNORE = []  # filled from GEOM["ignore_apps"] at startup
+
+
+def laptop_rows(objs, players):
+    """One row per app: its streams' volume + its MPRIS player's title and play/pause."""
+    apps = {}
+    for o in objs:
+        p = (o.get("info") or {}).get("props") or {}
+        if o.get("type") != "PipeWire:Interface:Node" or p.get("media.class") != "Stream/Output/Audio":
+            continue
+        name = p.get("node.name", "")
+        if p.get("api.bluez5.address") or name.startswith("bluez_input") or name.startswith("tandem"):
+            continue  # the phone's Bluetooth stream lives in the phone section
+        app = p.get("application.name") or p.get("application.process.binary") or name
+        if any(ig in norm(app) or ig in norm(p.get("application.process.binary")) for ig in IGNORE):
+            continue  # always-open system streams (TTS, dictation) are not "something playing"
+        vol, mute = node_volume(o)
+        a = apps.setdefault(app, {"id": "app:" + app, "app": app, "title": p.get("media.name", ""),
+                                  "bin": p.get("application.process.binary", ""), "nodes": [],
+                                  "volume": vol, "mute": mute, "player": None})
+        a["nodes"].append(o["id"])
+        a["running"] = a.get("running") or (o.get("info") or {}).get("state") == "running"
+        if vol is not None and (a["volume"] is None or vol > a["volume"]):
+            a["volume"] = vol
+    rows = list(apps.values())
+    for pl in players:
+        keys = {norm(pl["entry"]), norm(pl["identity"]), norm(pl["bus"].split(".")[3] if pl["bus"].count(".") >= 3 else "")}
+        keys.discard("")
+        match = next((a for a in rows if a["player"] is None and any(
+            k and (k in norm(a["app"]) or norm(a["app"]) in k or (a["bin"] and norm(a["bin"]) in k)) for k in keys)), None)
+        if match:
+            match["player"] = pl
+        elif pl["status"] in ("Playing", "Paused"):
+            rows.append({"id": "mpris:" + pl["bus"], "app": pl["identity"], "title": "", "nodes": [],
+                         "volume": None, "mute": False, "player": pl})
+    # An app is listed while it's actually playing, or while it has a player (so a paused tab can resume).
+    rows = [a for a in rows if a.get("running") or a["player"]]
+    generic = {"audiostream", "playback", "audiocallbackdriver", "output", "audio", "webrtc"}
+    for a in rows:
+        pl = a["player"]
+        if pl and pl["title"]:
+            a["title"] = pl["title"] + (f" · {pl['artist']}" if pl["artist"] else "")
+        elif norm(a["title"]) in generic or norm(a["title"]) == norm(a["app"]):
+            a["title"] = ""
+        if a["app"][:1].islower():
+            a["app"] = a["app"][:1].upper() + a["app"][1:]
+    return rows
+
+
+# ---------------------------------------------------------------- data: phone
+
+def read_state():
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+        return st if time.time() - st.get("updated", 0) < 10 else None
+    except (OSError, ValueError):
+        return None
+
+
+def ctl(**cmd):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        s.sendto(json.dumps(cmd).encode(), CTL)
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
+class Avrcp:
+    """The phone's player over Bluetooth (BlueZ MediaPlayer1), for when the laptop has the headphones."""
+
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+    def player(self, mac):
+        try:
+            r = self.bus.call_sync("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+                                   None, None, Gio.DBusCallFlags.NONE, 500, None)
+        except GLib.Error:
+            return None
+        dev = "dev_" + mac.replace(":", "_")
+        for path, ifaces in r.unpack()[0].items():
+            mp = ifaces.get("org.bluez.MediaPlayer1")
+            if mp and dev in path:
+                t = mp.get("Track") or {}
+                title = t.get("Title", "")
+                return {"path": path, "status": mp.get("Status", ""),
+                        "title": "" if title == "Not Provided" else title,  # BlueZ's placeholder while idle
+                        "artist": t.get("Artist", ""), "name": mp.get("Name", ""),
+                        "length": (t.get("Duration") or 0) / 1000, "position": (mp.get("Position") or 0) / 1000}
+        return None
+
+    def toggle(self, path, playing):
+        self.command(path, "Pause" if playing else "Play")
+
+    def command(self, path, method):  # Play / Pause / Next / Previous
+        try:
+            self.bus.call_sync("org.bluez", path, "org.bluez.MediaPlayer1", method,
+                               None, None, Gio.DBusCallFlags.NONE, 1000, None)
+        except GLib.Error:
+            pass
+
+
+# ---------------------------------------------------------------- widgets
+
+
+def nodes_of(objs, media_class):
+    out = []
+    for o in objs:
+        p = (o.get("info") or {}).get("props") or {}
+        if o.get("type") == "PipeWire:Interface:Node" and p.get("media.class") == media_class:
+            out.append(o)
+    return out
+
+
+def node_props(o):
+    return ((o or {}).get("info") or {}).get("props") or {}
+
+
+def default_node(objs, key):
+    name = None
+    for o in objs:
+        if o.get("type") == "PipeWire:Interface:Metadata" and (o.get("props") or {}).get("metadata.name") == "default":
+            for m in o.get("metadata") or []:
+                if m.get("key") == key:
+                    v = m.get("value")
+                    name = v.get("name") if isinstance(v, dict) else None
+    return next((o for o in objs if o.get("type") == "PipeWire:Interface:Node"
+                 and node_props(o).get("node.name") == name), None)
+
+
+def wpctl(*args):
+    subprocess.Popen(["wpctl", *map(str, args)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------------------------------------------------------- waybar setup
+
+def strip_jsonc(text):
+    """JSON with // and /* */ comments and trailing commas -> JSON (string-aware)."""
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\":
+                out.append(text[i + 1:i + 2])
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+            out.append(c)
+        elif text.startswith("//", i):
+            i = text.find("\n", i)
+            if i < 0:
+                break
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+
+def _read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def _write(path, text):
+    with open(path + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(path + ".tmp", path)
+
+
+def _backup(path):
+    b = path + ".bak.pre-tandem"
+    if os.path.exists(path) and not os.path.exists(b) and not os.path.exists(path + ".bak.pre-" + LEGACY):
+        _write(b, _read(path))
+
+
+def _add_include(text, inc):
+    m = re.search(r'("include"\s*:\s*\[)([^\]]*)\]', text)
+    if not m:
+        sys.exit("waybar config has no include list")
+    if inc in m.group(2):
+        return text
+    inner = m.group(2).rstrip()
+    return text[:m.start(2)] + inner + (", " if inner.strip() else "") + '"' + inc + '"' + text[m.end(2):]
+
+
+def _remove_include(text, inc):
+    return re.sub(r',?\s*"' + re.escape(inc) + '"', "", text)
+
+
+def _strip_style(css):
+    for start, end in ((STYLE_START, STYLE_END), ("/* %s:start */" % LEGACY, "/* %s:end */" % LEGACY)):
+        css = re.sub(re.escape(start) + r".*?" + re.escape(end) + r"\n?", "", css, flags=re.S)
+    return re.sub(r"\n?" + re.escape(OLD_STYLE_MARK) + r"\n[^\n]*\n?", "\n", css)
+
+
+def setup_waybar():
+    audio = GEOM["audio_module"]
+    text = _read(WAYBAR_CONFIG)
+    _backup(WAYBAR_CONFIG)
+    # 1. Undo the earlier "move the module to the center" version, if it was installed.
+    text = re.sub(r'"modules-right-base"(\s*:)', r'"modules-right"\1', text)
+    text = _remove_include(text, OLD_LAYOUT_INCLUDE)
+    if os.path.exists(OLD_LAYOUT):
+        os.unlink(OLD_LAYOUT)
+    # ...and the momentum-share names from before the rename.
+    text = text.replace('"cffi/%s"' % LEGACY, '"%s"' % CFFI_NAME)
+    text = _remove_include(text, LEGACY_INCLUDE)
+    if os.path.exists(LEGACY_GEN):
+        os.unlink(LEGACY_GEN)
+    # 2. The hover module sits right after the audio module (it also shows the shared-audio icon).
+    cfg = json.loads(strip_jsonc(text))
+    right = cfg.get("modules-right") or []
+    if CFFI_NAME not in right:
+        m = re.search(r'("modules-right"\s*:\s*\[[^\]]*?"' + re.escape(audio) + r'")(\s*,?)', text, flags=re.S)
+        if not m:
+            sys.exit(f'"{audio}" is not in modules-right; set "audio_module" in {CONFIG}')
+        text = text[:m.end(1)] + ', "' + CFFI_NAME + '"' + text[m.end(1):]
+    text = _add_include(text, GEN_INCLUDE)
+    json.loads(strip_jsonc(text))  # still valid?
+    _write(WAYBAR_CONFIG, text)
+    os.makedirs(os.path.dirname(GEN), exist_ok=True)
+    so = os.environ.get("TANDEM_HOVER_SO") or HOVER_SO
+    _write(GEN, json.dumps({CFFI_NAME: {"module_path": so, "target": audio}}, indent=2) + "\n")
+    # 3. The mixer replaces pavucontrol: drop the module's on-click.
+    try:
+        mods = _read(WAYBAR_MODULES)
+        new = re.sub(r'\n([ \t]*)"on-click"[ \t]*:[ \t]*"pavucontrol"[ \t]*,?', r'\n\1// on-click: hover/click opens tandem-mixer', mods)
+        new = new.replace(LEGACY_ONCLICK, "// on-click: hover/click opens tandem-mixer")
+        if new != mods:
+            _backup(WAYBAR_MODULES)
+            json.loads(strip_jsonc(new))
+            _write(WAYBAR_MODULES, new)
+    except OSError:
+        pass
+    # 4. Style for the shared-audio icon (tucked against the volume).
+    try:
+        css = _strip_style(_read(WAYBAR_STYLE))
+        _write(WAYBAR_STYLE, css.rstrip("\n") + "\n\n" + STYLE_START + "\n"
+               "#tandem { color: @blue; padding: 0 12px 0 0; margin-left: -8px; }\n" + STYLE_END + "\n")
+    except OSError:
+        pass
+    subprocess.run(["pkill", "-USR2", "-x", "waybar"], capture_output=True)
+    print("waybar: hover module added after", audio, "(backups: *.bak.pre-tandem)")
+
+
+def restore_waybar():
+    text = _read(WAYBAR_CONFIG)
+    for name in (CFFI_NAME, "cffi/" + LEGACY):
+        text = re.sub(r',\s*"' + re.escape(name) + '"', "", text)
+    text = re.sub(r'"modules-right-base"(\s*:)', r'"modules-right"\1', text)
+    for inc in (GEN_INCLUDE, OLD_LAYOUT_INCLUDE, LEGACY_INCLUDE):
+        text = _remove_include(text, inc)
+    _write(WAYBAR_CONFIG, text)
+    try:
+        mods = _read(WAYBAR_MODULES)
+        for mark in ("// on-click: hover/click opens tandem-mixer", LEGACY_ONCLICK):
+            mods = mods.replace(mark, '"on-click": "pavucontrol"')
+        _write(WAYBAR_MODULES, mods)
+        _write(WAYBAR_STYLE, _strip_style(_read(WAYBAR_STYLE)).rstrip("\n") + "\n")
+    except OSError:
+        pass
+    for p in (GEN, OLD_LAYOUT, LEGACY_GEN):
+        if os.path.exists(p):
+            os.unlink(p)
+    subprocess.run(["pkill", "-USR2", "-x", "waybar"], capture_output=True)
+    print("waybar restored")
+
+
+# ---------------------------------------------------------------- widgets
+
+class Row(Gtk.Box):
+    """Name + title, play/pause, volume slider; click the % to mute. Updated in place, never rebuilt."""
+
+    def __init__(self, on_toggle, on_volume, on_mute=None, master=False):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.on_toggle, self.on_volume, self.on_mute = on_toggle, on_volume, on_mute
+        self.dragging = False
+        self.pending = None
+        top = Gtk.Box(spacing=8)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.app = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.app.get_style_context().add_class("section" if master else "app")
+        self.title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.title.get_style_context().add_class("where" if master else "title")
+        text.pack_start(self.app, False, False, 0)
+        text.pack_start(self.title, False, False, 0)
+        top.pack_start(text, True, True, 0)
+        self.pp = Gtk.Button(label="")
+        self.pp.get_style_context().add_class("pp")
+        self.pp.set_valign(Gtk.Align.CENTER)
+        self.pp.connect("clicked", lambda *_: self.on_toggle())
+        top.pack_end(self.pp, False, False, 0)
+        self.pack_start(top, False, False, 0)
+        bottom = Gtk.Box(spacing=6)
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.01)
+        self.scale.set_draw_value(False)
+        if master:
+            self.scale.get_style_context().add_class("master")
+        self.scale.connect("button-press-event", self._press)
+        self.scale.connect("button-release-event", self._release)
+        self.handler = self.scale.connect("value-changed", self._changed)
+        pct_box = Gtk.EventBox()
+        self.pct = Gtk.Label(xalign=1)
+        self.pct.get_style_context().add_class("pct")
+        pct_box.add(self.pct)
+        pct_box.connect("button-press-event", lambda *_: self.on_mute and self.on_mute())
+        bottom.pack_start(self.scale, True, True, 0)
+        bottom.pack_end(pct_box, False, False, 0)
+        self.pack_start(bottom, False, False, 0)
+        self.bottom = bottom
+
+    def _press(self, *_):
+        self.dragging = True
+
+    def _release(self, *_):
+        self.dragging = False
+
+    def _changed(self, scale):
+        self.pct.set_text(f"{round(scale.get_value() * 100)}%")
+        # Debounce: wpctl/the phone get the latest value at most ~16 times a second.
+        if self.pending is None:
+            self.pending = GLib.timeout_add(60, self._flush)
+
+    def _flush(self):
+        self.pending = None
+        self.on_volume(self.scale.get_value())
+        return False
+
+    def update(self, app, title, volume, mute=False, playing=None):
+        self.app.set_text(app)
+        self.title.set_text(title or "")
+        self.title.set_visible(bool(title))
+        if playing is None:
+            self.pp.set_visible(False)
+        else:
+            self.pp.set_visible(True)
+            self.pp.set_label("󰏤" if playing else "󰐊")
+            ctx = self.pp.get_style_context()
+            (ctx.add_class if playing else ctx.remove_class)("playing")
+        self.bottom.set_visible(volume is not None)
+        if volume is not None and not self.dragging and self.pending is None:
+            self.scale.handler_block(self.handler)
+            self.scale.set_value(volume)
+            self.scale.handler_unblock(self.handler)
+            self.pct.set_text("muted" if mute else f"{round(volume * 100)}%")
+        ctx = self.scale.get_style_context()
+        (ctx.add_class if mute else ctx.remove_class)("muted")
+
+
+class HubSwitch(Gtk.Box):
+    """Which device carries the other's audio: [Laptop | Phone]. Click to switch; while the handoff runs,
+    the target shows as pending and the note says what's happening."""
+
+    def __init__(self, on_pick):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        top.get_style_context().add_class("hubrow")
+        title = Gtk.Label(label="HUB", xalign=0)
+        title.get_style_context().add_class("section")
+        top.pack_start(title, False, False, 0)
+        seg = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        seg.get_style_context().add_class("seg")
+        self.buttons = {}
+        for key, label in (("laptop", "Laptop"), ("phone", "Phone")):
+            b = Gtk.Button(label=label)
+            b.get_style_context().add_class("seg-b")
+            b.connect("clicked", lambda _b, k=key: on_pick(k))
+            seg.pack_start(b, False, False, 0)
+            self.buttons[key] = b
+        top.pack_end(seg, False, False, 0)
+        self.pack_start(top, False, False, 0)
+        self.note = Gtk.Label(label="", xalign=0)
+        self.note.get_style_context().add_class("hubnote")
+        self.note.set_line_wrap(True)
+        self.pack_start(self.note, False, False, 0)
+        top.show_all()  # the switch itself is no-show-all (the mixer shows it), so show_all() wouldn't reach these
+        self.note.show()
+
+    def update(self, prefer, owner):
+        """prefer: the setting; owner: who has the headphones right now."""
+        done = owner == prefer
+        for key, b in self.buttons.items():
+            ctx = b.get_style_context()
+            (ctx.add_class if key == prefer and done else ctx.remove_class)("on")
+            (ctx.add_class if key == prefer and not done else ctx.remove_class)("pending")
+        if not done:
+            text = f"Handing the headphones to the {prefer}…"
+        elif prefer == "laptop":
+            text = "Phone audio plays through the laptop"
+        else:
+            text = "Laptop audio plays through the phone"
+        if self.note.get_text() != text:
+            self.note.set_text(text)
+
+
+class Section(Gtk.Box):
+    """A master row, optional device buttons, and a list of rows keyed by id."""
+
+    def __init__(self, empty_text=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.on_master = lambda v: None
+        self.on_master_mute = lambda: None
+        self.master = Row(lambda: None, lambda v: self.on_master(v), lambda: self.on_master_mute(), master=True)
+        self.pack_start(self.master, False, False, 0)
+        self.devices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.devices.set_halign(Gtk.Align.START)
+        self.pack_start(self.devices, False, False, 0)
+        self.dev_buttons = {}
+        self.rows = {}
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.pack_start(self.list, False, False, 0)
+        self.empty = Gtk.Label(label=empty_text or "", xalign=0)
+        self.empty.get_style_context().add_class("empty")
+        self.pack_start(self.empty, False, False, 0)
+        self.empty_text = empty_text
+        for w in (self.devices, self.list, self.empty):  # shown explicitly by sync*()
+            w.set_no_show_all(True)
+            w.hide()
+
+    def sync_devices(self, devices, on_pick):
+        """devices: [(id, label, current)]; hidden when there's only one."""
+        seen = set()
+        for did, label, current in devices:
+            seen.add(did)
+            b = self.dev_buttons.get(did)
+            if b is None:
+                b = self.dev_buttons[did] = Gtk.Button(label=label)
+                b.get_style_context().add_class("dev")
+                b.get_child().set_xalign(0)
+                b.set_halign(Gtk.Align.START)
+                b.connect("clicked", lambda _b, d=did: on_pick(d))
+                self.devices.pack_start(b, False, False, 0)
+                b.show_all()
+            b.set_label(("● " if current else "") + label)
+            ctx = b.get_style_context()
+            (ctx.add_class if current else ctx.remove_class)("current")
+        for did in list(self.dev_buttons):
+            if did not in seen:
+                self.devices.remove(self.dev_buttons.pop(did))
+        self.devices.set_visible(len(devices) > 1)
+        if len(devices) > 1:
+            self.devices.show_all()
+
+    def sync(self, items, make_callbacks):
+        """items: [{id, app, title, volume, mute, playing}] in display order."""
+        seen = set()
+        for i, it in enumerate(items):
+            seen.add(it["id"])
+            row = self.rows.get(it["id"])
+            if row is None:
+                row = self.rows[it["id"]] = Row(*make_callbacks(it["id"]))
+                self.list.pack_start(row, False, False, 0)
+                row.show_all()
+            self.list.reorder_child(row, i)
+            row.update(it["app"], it.get("title"), it.get("volume"), it.get("mute", False), it.get("playing"))
+        for rid in list(self.rows):
+            if rid not in seen:
+                self.list.remove(self.rows.pop(rid))
+        self.list.set_visible(bool(items))
+        self.empty.set_visible(bool(self.empty_text) and not items)
+
+
+def separator():
+    sep = Gtk.Box()
+    sep.get_style_context().add_class("sep")
+    return sep
+
+
+def layer(win, anchor_top=True, margin_top=0, overlay=True):
+    if GtkLayerShell is None:
+        return
+    GtkLayerShell.init_for_window(win)
+    GtkLayerShell.set_namespace(win, "tandem")
+    GtkLayerShell.set_layer(win, GtkLayerShell.Layer.OVERLAY if overlay else GtkLayerShell.Layer.TOP)
+    GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.TOP, anchor_top)
+    GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, margin_top)
+    GtkLayerShell.set_exclusive_zone(win, -1)  # float over the bar, never push windows around
+
+
+def transparent(win):
+    screen = win.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual:
+        win.set_visual(visual)
+    win.set_app_paintable(True)
+
+
+class Fader:
+    """Crossfades a widget in and out (blends, never hard cuts)."""
+
+    def __init__(self, widget, on_hidden, ms=160):
+        self.w, self.on_hidden, self.ms = widget, on_hidden, ms
+        self.target, self.anim = 0.0, None
+        widget.set_opacity(0.0)
+
+    def to(self, target):
+        self.target = target
+        if self.anim is None:
+            self.t0, self.start = time.monotonic(), self.w.get_opacity()
+            self.anim = GLib.timeout_add(16, self._step)
+        else:
+            self.t0, self.start = time.monotonic(), self.w.get_opacity()
+
+    def _step(self):
+        k = min(1.0, (time.monotonic() - self.t0) * 1000 / self.ms)
+        k = 1 - (1 - k) ** 3  # ease-out
+        self.w.set_opacity(self.start + (self.target - self.start) * k)
+        if k >= 1.0:
+            self.anim = None
+            if self.target == 0.0:
+                self.on_hidden()
+            return False
+        return True
+
+
+
+# ---------------------------------------------------------------- now playing (center of the bar)
+
+ART_DIR = os.path.join(RUNTIME, "tandem-art")  # phone art, written by the daemon
+ART_CACHE = os.path.expanduser("~/.cache/tandem/art")
+PAUSED_LINGER = 600  # a paused track stays in the bar this long (s), then fades away
+
+NP_CSS = b"""
+.np { border-radius: 6px; padding: 0 4px 0 3px; background-color: rgba(54, 58, 79, 0.55);
+      transition: background-color 600ms ease; }
+.np .art { border-radius: 4px; background-color: #363a4f; background-size: cover;
+           background-position: center; min-width: 17px; min-height: 17px; }
+.np .noart { color: #8087a2; font-size: 11px; min-width: 17px; }
+.np .song { color: #cad3f5; font-size: 12px; }
+.np .src { color: #8087a2; font-size: 11px; }
+.np button { background: transparent; color: #a5adcb; border: none; box-shadow: none; min-height: 19px;
+             min-width: 19px; padding: 0 3px; border-radius: 5px; transition: background 150ms ease, color 150ms ease; }
+.np button label { font-size: 12px; }
+.np button:hover { background: rgba(138, 173, 244, 0.18); color: #8aadf4; }
+.np button.play { color: #cad3f5; }
+.progress { background-color: rgba(138, 173, 244, 0.75); min-height: 2px; border-radius: 1px; }
+"""
+
+
+def fetch_art(url):
+    """Local path for an art URL (file:// as-is, http(s) cached in ~/.cache); None until downloaded."""
+    if not url:
+        return None
+    if url.startswith("file://"):
+        p = GLib.filename_from_uri(url)[0]
+        return p if os.path.exists(p) else None
+    if not url.startswith(("http://", "https://")):
+        return None
+    import hashlib
+    path = os.path.join(ART_CACHE, hashlib.sha1(url.encode()).hexdigest() + ".img")
+    if os.path.exists(path):
+        return path
+    if url not in fetch_art.pending:
+        fetch_art.pending.add(url)
+
+        def get():
+            import urllib.request
+            try:
+                os.makedirs(ART_CACHE, exist_ok=True)
+                with urllib.request.urlopen(url, timeout=8) as r:
+                    data = r.read(2_000_000)
+                with open(path + ".tmp", "wb") as f:
+                    f.write(data)
+                os.replace(path + ".tmp", path)
+            except OSError:
+                pass
+            finally:
+                fetch_art.pending.discard(url)
+        import threading
+        threading.Thread(target=get, daemon=True).start()
+    return None
+
+
+fetch_art.pending = set()
+
+
+def art_tint(path):
+    """Average color of the cover (for the pill's glow), or None."""
+    try:
+        from gi.repository import GdkPixbuf
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 8, 8, False)
+    except (GLib.Error, ValueError):
+        return None
+    px, n, stride = pb.get_pixels(), pb.get_n_channels(), pb.get_rowstride()
+    r = g = b = 0
+    count = 0
+    for y in range(pb.get_height()):
+        for x in range(pb.get_width()):
+            i = y * stride + x * n
+            r, g, b, count = r + px[i], g + px[i + 1], b + px[i + 2], count + 1
+    return (r // count, g // count, b // count) if count else None
+
+
+class NowPlaying:
+    """A pill in the middle of the bar: cover, song, ⏮ ⏯ ⏭, progress. Crossfades between tracks."""
+
+    def __init__(self, on_command):
+        self.on_command = on_command
+        self.current = None  # the track shown
+        self.width = GEOM["np_width"]
+        self.mode = "full"  # full (song + artist) | title | mini (cover + buttons) | hidden: no room
+        self.page = 0
+        self.tint = None
+        self.win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+        self.win.set_decorated(False)
+        if "--np" not in sys.argv:  # the demo paints the bar color behind it instead
+            transparent(self.win)
+        inset = 3
+        if GtkLayerShell is not None:
+            GtkLayerShell.init_for_window(self.win)
+            GtkLayerShell.set_namespace(self.win, "tandem-np")
+            GtkLayerShell.set_layer(self.win, GtkLayerShell.Layer.TOP)  # like waybar: hidden by fullscreen
+            GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.TOP, True)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, GEOM["bar_margin_top"] + inset)
+            GtkLayerShell.set_exclusive_zone(self.win, -1)
+            GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
+        height = GEOM["bar_height"] - 2 * inset
+
+        overlay = Gtk.Overlay()
+        self.pill = Gtk.Box(spacing=7)
+        self.pill.get_style_context().add_class("np")
+        self.pill.set_size_request(GEOM["np_width"], height)
+        self.pill_css = Gtk.CssProvider()
+        self.pill.get_style_context().add_provider(self.pill_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+
+        # Two pages (cover + text) so a track change is a crossfade, never a hard cut.
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=450)
+        self.stack.set_hhomogeneous(False)  # size to the visible page (it shrinks in mini mode)
+        self.pages = [self._page() for _ in range(2)]
+        for i, (box, *_r) in enumerate(self.pages):
+            self.stack.add_named(box, str(i))
+        title_click = Gtk.EventBox()
+        title_click.add(self.stack)
+        title_click.connect("button-press-event", lambda *_: self.on_command(self.current, "focus"))
+        self.pill.pack_start(title_click, True, True, 0)
+
+        self.src = Gtk.Label()
+        self.src.get_style_context().add_class("src")
+        self.pill.pack_start(self.src, False, False, 0)
+        self.buttons = {}
+        for name, glyph in (("Previous", "󰒮"), ("PlayPause", "󰐊"), ("Next", "󰒭")):
+            b = Gtk.Button(label=glyph)
+            b.set_valign(Gtk.Align.CENTER)
+            b.connect("clicked", lambda _b, n=name: self.on_command(self.current, n))
+            if name == "PlayPause":
+                b.get_style_context().add_class("play")
+            self.buttons[name] = b
+            self.pill.pack_start(b, False, False, 0)
+        overlay.add(self.pill)
+
+        self.progress = Gtk.Box()
+        self.progress.get_style_context().add_class("progress")
+        self.progress.set_halign(Gtk.Align.START)
+        self.progress.set_valign(Gtk.Align.END)
+        self.progress.set_margin_start(4)
+        self.progress.set_size_request(0, 2)
+        overlay.add_overlay(self.progress)
+        overlay.set_overlay_pass_through(self.progress, True)
+
+        self.win.add(overlay)
+        self.fade = Fader(overlay, self.win.hide, ms=350)
+
+    def _page(self):
+        box = Gtk.Box(spacing=7)
+        art = Gtk.Box()
+        art.get_style_context().add_class("art")
+        art.set_valign(Gtk.Align.CENTER)
+        art_css = Gtk.CssProvider()
+        art.get_style_context().add_provider(art_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        noart = Gtk.Label(label="󰎈")
+        noart.get_style_context().add_class("noart")
+        song = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        song.get_style_context().add_class("song")
+        song.set_use_markup(True)
+        song.set_max_width_chars(max(3, int((GEOM["np_width"] - 155) / 7.3)))
+        box.pack_start(art, False, False, 0)
+        box.pack_start(noart, False, False, 0)
+        box.pack_start(song, True, True, 0)
+        return box, art, art_css, noart, song
+
+    def _fill(self, page, t):
+        box, art, art_css, noart, song = page
+        title = GLib.markup_escape_text(t["title"] or "Unknown")
+        artist = GLib.markup_escape_text(t.get("artist") or "")
+        show_artist = artist and self.mode == "full"
+        song.set_markup(f"{title}" + (f"  <span foreground='#8087a2'>{artist}</span>" if show_artist else ""))
+        song.set_visible(self.mode != "mini")
+        path = t.get("art_path")
+        if path:
+            uri = GLib.filename_to_uri(path, None)
+            art_css.load_from_data(f'* {{ background-image: url("{uri}"); }}'.encode())
+        art.set_visible(bool(path))
+        noart.set_visible(not path)
+        page[0].show()
+
+    def _set_tint(self, rgb):
+        if rgb == self.tint:
+            return
+        self.tint = rgb
+        if rgb:
+            r, g, b = rgb
+            css = (f".np {{ background-color: rgba(54, 58, 79, 0.55); background-image: linear-gradient(90deg, "
+                   f"rgba({r}, {g}, {b}, 0.32), rgba({r}, {g}, {b}, 0.10) 45%, rgba({r}, {g}, {b}, 0) 80%); }}")
+        else:
+            css = ".np { background-image: none; }"
+        self.pill_css.load_from_data(css.encode())
+
+    def remap(self):
+        """waybar restarted and is now stacked above us: unmap/map to come back on top."""
+        if self.win.get_visible() and self.current:
+            t = self.current
+            self.win.hide()
+            self.current = None
+            GLib.timeout_add(400, lambda: self.update(t, force=True) and False)
+
+    def set_bounds(self, left_end, right_start, bar_width):
+        """Fit between the bar's left and right modules (reported live by waybar-hover.so)."""
+        cx = bar_width / 2
+        room = 2 * (min(cx - left_end, right_start - cx) - 12)
+        width = int(min(GEOM["np_width"], room))
+        mode = "full" if width >= 300 else "title" if width >= 210 else "mini" if width >= 145 else "hidden"
+        if width == self.width and mode == self.mode:
+            return
+        self.width, self.mode = width, mode
+        self.pill.set_size_request(max(width, 0), GEOM["bar_height"] - 6)
+        # Cap the song's natural width so the pill never grows past the room it has
+        # (cover + badge + 3 buttons + spacing ~ 155 px; JetBrains Mono 12px ~ 7.3 px/char).
+        chars = max(3, int((width - 155) / 7.3))
+        for page in self.pages:
+            page[4].set_max_width_chars(chars)
+        self.win.resize(1, 1)  # let the layer surface shrink, not just grow
+        if self.current:
+            t, self.current = self.current, None
+            self.update(t, force=True)
+
+    def update(self, t, force=False):
+        if t and self.mode == "hidden":  # no room in the bar right now: step aside, keep the track
+            if self.current is not None:
+                self.fade.to(0.0)
+            self.current = t
+            t["_key"] = None
+            return
+        if not t:
+            if self.current is not None:
+                self.current = None
+                self.fade.to(0.0)
+            return
+        key = (t["source"], t["title"], t.get("artist"), t.get("art_path"))
+        changed = force or self.current is None or key != self.current.get("_key")
+        t["_key"] = key
+        appearing = self.current is None
+        self.current = t
+        if changed:
+            if appearing or force:
+                self._fill(self.pages[self.page], t)
+                self.stack.set_visible_child_name(str(self.page))
+            else:
+                self.page ^= 1
+                self._fill(self.pages[self.page], t)
+                self.stack.set_visible_child_name(str(self.page))
+            self._set_tint(art_tint(t["art_path"]) if t.get("art_path") else None)
+        self.buttons["PlayPause"].set_label("󰏤" if t["playing"] else "󰐊")
+        self.src.set_text("󰄜" if t["source"] != "laptop" else "")
+        self.src.set_visible(t["source"] != "laptop" and self.mode != "mini")
+        frac = (t["position"] / t["length"]) if t.get("length") else 0
+        width = self.width - 8
+        self.progress.set_size_request(max(0, min(width, int(width * frac))), 2)
+        self.progress.set_visible(bool(t.get("length")))
+        if appearing or not self.win.get_visible():
+            self.win.show_all()
+            self._fill(self.pages[self.page], t)  # show_all() undid the art/noart/song visibility
+            self.src.set_visible(t["source"] != "laptop" and self.mode != "mini")
+            self.progress.set_visible(bool(t.get("length")))
+        self.fade.to(1.0)
+
+
+# ---------------------------------------------------------------- the app
+
+class Mixer:
+    def __init__(self):
+        try:
+            with open(CONFIG) as f:
+                GEOM.update(json.load(f))
+        except (OSError, ValueError):
+            pass
+        IGNORE[:] = [norm(a) for a in GEOM["ignore_apps"]]
+        css = Gtk.CssProvider()
+        css.load_from_data(CSS + NP_CSS + (b"window { background: #24273a; }" if "--np" in sys.argv else b""))
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.mpris = Mpris()
+        self.avrcp = Avrcp()
+        self.state = None
+        self.objs, self.players = [], []
+        self.hover_module = self.hover_pop = False
+        self.pinned = False
+        self.hide_timer = None
+        self.anchor = None  # (x, width) of the audio module in bar coordinates
+        self.laptop_rows, self.phone_rows = {}, {}
+        self.phone_player = None
+        self.indicator = None
+
+        self.win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+        self.win.set_decorated(False)
+        transparent(self.win)
+        layer(self.win, margin_top=GEOM["bar_margin_top"] + GEOM["bar_height"] + GEOM["gap"])
+        if GtkLayerShell is not None:
+            GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.LEFT, True)
+            GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
+        pop = Gtk.EventBox()
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.get_style_context().add_class("mixer")
+        root.set_size_request(GEOM["width"], -1)
+        self.output = Section()
+        self.apps = Section("Nothing playing")
+        self.mic = Section()
+        self.phone = Section("Nothing playing on the phone")
+        self.phone_sep = separator()
+        self.hub = HubSwitch(lambda to: ctl(op="switch", to=to))
+        self.hub_sep = separator()
+        for w in (self.output, separator(), self.apps, separator(), self.mic, self.hub_sep, self.hub,
+                  self.phone_sep, self.phone):
+            root.pack_start(w, False, False, 0)
+        for w in (self.hub, self.hub_sep):  # shown by update_hub()
+            w.set_no_show_all(True)
+        self.apps.master.set_no_show_all(True)  # apps have no master row
+        self.apps.master.hide()
+        pop.add(root)
+        pop.connect("enter-notify-event", lambda *_: self.hover("pop", True))
+        pop.connect("leave-notify-event", self.pop_leave)
+        self.win.add(pop)
+        self.fade = Fader(pop, self.win.hide, ms=160)
+        self.output.on_master = lambda v: self.set_default_volume("default.audio.sink", v)
+        self.output.on_master_mute = lambda: self.toggle_default_mute("default.audio.sink")
+        self.mic.on_master = lambda v: self.set_default_volume("default.audio.source", v)
+        self.mic.on_master_mute = lambda: self.toggle_default_mute("default.audio.source")
+        self.phone.on_master = self.set_phone_master
+        self.phone.on_master_mute = self.mute_phone
+
+        self.np = NowPlaying(self.np_command)
+        self.last_playing = {}
+        self.listen()
+        self.refresh()
+        GLib.timeout_add(500, self.refresh)
+        if DEMO and "--np" not in sys.argv:
+            self.anchor = (900, 80)
+            self.show()
+
+    # -- messages from waybar-hover.so
+    def listen(self):
+        try:
+            os.unlink(SOCK)
+        except OSError:
+            pass
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.sock.bind(SOCK)
+        self.sock_ino = os.stat(SOCK).st_ino
+        self.sock.setblocking(False)
+        GLib.io_add_watch(self.sock.fileno(), GLib.IO_IN, self.on_message)
+
+    def on_message(self, *_):
+        while True:
+            try:
+                msg = self.sock.recv(256).decode(errors="replace").split()
+            except BlockingIOError:
+                return True
+            if not msg:
+                continue
+            if msg[0] == "enter" and len(msg) >= 3:
+                self.anchor = (int(msg[1]), int(msg[2]))
+                self.hover("module", True)
+            elif msg[0] == "leave":
+                self.hover("module", False)
+            elif msg[0] == "click":
+                self.pinned = not (self.pinned and self.win.get_visible())
+                (self.show if self.pinned else self.hide)()
+            elif msg[0] == "layout" and len(msg) >= 4:
+                self.np.set_bounds(int(msg[1]), int(msg[2]), int(msg[3]))
+            elif msg[0] == "hello":
+                self.np.remap()
+            elif msg[0] == "toggle":
+                self.pinned = not self.win.get_visible() or self.fade.target == 0
+                (self.show if self.pinned else self.hide)()
+
+    # -- open on hover, close shortly after the pointer leaves both (unless pinned by a click)
+    def hover(self, which, inside):
+        setattr(self, "hover_" + which, inside)
+        if self.hover_module or self.hover_pop:
+            if self.hide_timer:
+                GLib.source_remove(self.hide_timer)
+                self.hide_timer = None
+            self.show()
+        elif not self.hide_timer and not self.pinned:
+            self.hide_timer = GLib.timeout_add(350, self.hide)
+
+    def pop_leave(self, widget, event):
+        # GTK sends leave when the pointer moves onto a child (a slider); only real exits count.
+        if event.detail != Gdk.NotifyType.INFERIOR:
+            self.hover("pop", False)
+
+    def show(self):
+        if not self.win.get_visible():
+            self.refresh(force=True)
+            self.place()
+            self.win.show_all()
+            self.refresh(force=True)  # show_all() reveals widgets update() hid on purpose
+        self.fade.to(1.0)
+
+    def hide(self):
+        self.hide_timer = None
+        self.pinned = False
+        if not DEMO:
+            self.fade.to(0.0)
+        return False
+
+    def place(self):
+        """Center the mixer under the audio module, kept on screen."""
+        if GtkLayerShell is None or not self.anchor:
+            return
+        x, w = self.anchor
+        mon = Gdk.Display.get_default().get_monitor(0)
+        screen_w = mon.get_geometry().width if mon else 1920
+        left = GEOM["bar_margin_left"] + x + w // 2 - GEOM["width"] // 2
+        left = max(4, min(left, screen_w - GEOM["width"] - 6))
+        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.LEFT, left)
+
+    # -- actions
+    def set_default_volume(self, key, v):
+        n = default_node(self.objs, key)
+        if n:
+            wpctl("set-volume", n["id"], f"{max(0.0, min(v, 1.0)):.3f}")
+
+    def toggle_default_mute(self, key):
+        n = default_node(self.objs, key)
+        if n:
+            wpctl("set-mute", n["id"], "toggle")
+            GLib.timeout_add(120, lambda: self.refresh(force=True) and False)
+
+    def set_phone_master(self, v):
+        if self.state and self.state.get("owner") == "phone":
+            ctl(op="volume", value=v)
+        elif getattr(self, "phone_node", None):
+            wpctl("set-volume", self.phone_node["id"], f"{v:.3f}")
+
+    def mute_phone(self):
+        if getattr(self, "phone_node", None):
+            wpctl("set-mute", self.phone_node["id"], "toggle")
+
+    # -- data
+    def sharing(self):
+        st = self.state
+        return bool(st and ((st.get("owner") == "phone" and st.get("streaming"))
+                            or (st.get("owner") == "laptop" and st.get("phone_linked"))))
+
+    def refresh(self, force=False):
+        self.state = demo_state() if DEMO else read_state()
+        self.write_indicator()
+        self.players = demo_players() if DEMO else self.mpris.players()
+        self.np.update(self.now_playing())
+        if not (self.win.get_visible() or force):
+            return True
+        self.objs = demo_objs() if DEMO else pw_objects()
+        self.update_output()
+        self.update_apps()
+        self.update_mic()
+        self.update_hub()
+        self.update_phone()
+        return True
+
+    # -- now playing
+    def now_playing(self):
+        """The track for the center pill: a playing one first (laptop wins ties), or one paused
+        less than PAUSED_LINGER ago."""
+        want = [w.lower() for w in GEOM["media_players"]]
+
+        def match(*names):
+            return any(w in (n or "").lower() for n in names for w in want)
+        cands = []
+        for pl in self.players:
+            if match(pl["bus"], pl["identity"], pl["entry"]) and pl["title"]:
+                cands.append({"source": "laptop", "id": pl["bus"], "title": pl["title"], "artist": pl["artist"],
+                              "playing": pl["status"] == "Playing", "length": pl.get("length", 0),
+                              "position": pl.get("position", 0), "art_path": fetch_art(pl.get("art"))})
+        st = self.state or {}
+        if st.get("owner") == "phone":
+            for m in st.get("phone_media") or []:
+                if not (match(m["id"], m.get("app")) and m.get("title")):
+                    continue
+                art = fetch_art(m["art"]) if m.get("art") else None
+                if not art and m.get("art_key"):
+                    p = os.path.join(ART_DIR, m["art_key"] + ".jpg")
+                    art = p if os.path.exists(p) else None
+                cands.append({"source": "phone", "id": m["id"], "title": m["title"], "artist": m.get("artist", ""),
+                              "playing": bool(m.get("playing")), "length": (m.get("dur") or 0) / 1000,
+                              "position": (m.get("pos") or 0) / 1000, "art_path": art})
+        elif st.get("owner") == "laptop" and st.get("phone_linked"):
+            mac = st.get("phone_mac", "")
+            pl = self.avrcp.player(mac) if mac else None
+            if pl and pl["title"] and (not pl["name"] or match(pl["name"])):
+                cands.append({"source": "avrcp", "id": pl["path"], "title": pl["title"], "artist": pl["artist"],
+                              "playing": pl["status"] == "playing", "length": pl["length"],
+                              "position": pl["position"], "art_path": None})
+        if DEMO and cands:
+            cands[0]["art_path"] = demo_art()
+        now = time.monotonic()
+        for c in cands:
+            if c["playing"]:
+                self.last_playing[(c["source"], c["id"])] = now
+        live = [c for c in cands
+                if c["playing"] or now - self.last_playing.get((c["source"], c["id"]), -1e9) < PAUSED_LINGER]
+        if not live:
+            return None
+        live.sort(key=lambda c: (not c["playing"], c["source"] != "laptop"))
+        return live[0]
+
+    def np_command(self, t, cmd):
+        if not t:
+            return
+        if cmd == "focus":
+            if t["source"] == "laptop":
+                subprocess.Popen(["sh", "-c", "swaymsg '[app_id=\"(?i)spotify\"] focus' >/dev/null 2>&1 || "
+                                  "swaymsg '[class=\"(?i)spotify\"] focus' >/dev/null 2>&1"])
+            return
+        if t["source"] == "laptop":
+            self.mpris.command(t["id"], cmd)
+        elif t["source"] == "phone":
+            ctl(op={"PlayPause": "toggle", "Next": "next", "Previous": "previous"}[cmd], id=t["id"])
+        elif t["source"] == "avrcp":
+            self.avrcp.command(t["id"], {"PlayPause": "Pause" if t["playing"] else "Play"}.get(cmd, cmd))
+        if cmd == "PlayPause":  # answer the click now; the next poll confirms
+            t["playing"] = not t["playing"]
+            self.np.update(t)
+        GLib.timeout_add(250, lambda: self.refresh() and False)
+
+    def write_indicator(self):
+        want = GEOM["indicator"] if self.sharing() else ""
+        if want != self.indicator:
+            self.indicator = want
+            try:
+                with open(INDICATOR + ".tmp", "w") as f:
+                    f.write(want)
+                os.replace(INDICATOR + ".tmp", INDICATOR)
+            except OSError:
+                pass
+
+    def update_output(self):
+        sink = default_node(self.objs, "default.audio.sink")
+        vol, mute = node_volume(sink) if sink else (None, False)
+        name = node_props(sink).get("node.description") or node_props(sink).get("node.name") or "No output"
+        self.output.master.update("OUTPUT", name, vol, mute)
+        cur = sink["id"] if sink else None
+        devs = [(o["id"], node_props(o).get("node.description") or node_props(o).get("node.name", "?"), o["id"] == cur)
+                for o in nodes_of(self.objs, "Audio/Sink")]
+        self.output.sync_devices(devs, self.pick_output)
+
+    def pick_output(self, node_id):
+        wpctl("set-default", node_id)
+        GLib.timeout_add(150, lambda: self.refresh(force=True) and False)
+
+    def update_apps(self):
+        rows = laptop_rows(self.objs, self.players)
+        self.laptop_rows = {r["id"]: r for r in rows}
+        items = [{"id": r["id"], "app": r["app"], "title": r["title"], "volume": r["volume"], "mute": r["mute"],
+                  "playing": (r["player"]["status"] == "Playing") if r["player"] else None} for r in rows]
+        self.apps.sync(items, self.app_callbacks)
+
+    def app_callbacks(self, rid):
+        def toggle():
+            r = self.laptop_rows.get(rid)
+            if r and r["player"]:
+                self.mpris.play_pause(r["player"]["bus"])
+                GLib.timeout_add(150, lambda: self.refresh(force=True) and False)
+
+        def volume(v):
+            for n in (self.laptop_rows.get(rid) or {}).get("nodes", []):
+                wpctl("set-volume", n, f"{v:.3f}")
+
+        def mute():
+            for n in (self.laptop_rows.get(rid) or {}).get("nodes", []):
+                wpctl("set-mute", n, "toggle")
+            GLib.timeout_add(120, lambda: self.refresh(force=True) and False)
+        return toggle, volume, mute
+
+    def update_mic(self):
+        src = default_node(self.objs, "default.audio.source")
+        vol, mute = node_volume(src) if src else (None, False)
+        name = node_props(src).get("node.description") or "No microphone"
+        self.mic.master.update("MIC", name, vol, mute)
+        cur = src["id"] if src else None
+        devs = [(o["id"], node_props(o).get("node.description") or node_props(o).get("node.name", "?"), o["id"] == cur)
+                for o in nodes_of(self.objs, "Audio/Source")]
+        self.mic.sync_devices(devs, self.pick_output)
+
+    def update_hub(self):
+        """The switch shows while the headphones are on the phone, or the phone is linked over Bluetooth.
+        (The app reports all the time now, for the clipboard, so "phone reports" alone isn't enough.)"""
+        st = self.state or {}
+        show = bool((st.get("phone") and st.get("phone_hp_linked")) or st.get("phone_linked"))
+        for w in (self.hub, self.hub_sep):
+            w.set_visible(show)
+        if show:
+            self.hub.update(st.get("prefer", "phone"), st.get("owner"))
+
+    def update_phone(self):
+        st = self.state
+        show = self.sharing()
+        self.phone.set_visible(show)
+        self.phone_sep.set_visible(show)
+        if not show:
+            return
+        items = []
+        self.phone_node = None
+        bat = st.get("phone_battery") or {}
+        bat = f" · {bat['level']}%" if bat.get("level") is not None else ""
+        if st.get("owner") == "phone":
+            note = "media volume" if st.get("phone_media_access", True) else \
+                "allow media access in the Tandem app to see players"
+            self.phone.master.update("PHONE", note + bat, st.get("phone_volume"))
+            for m in st.get("phone_media") or []:
+                items.append({"id": "phone:" + m["id"], "app": m.get("app") or m["id"],
+                              "title": " · ".join(x for x in (m.get("title"), m.get("artist")) if x),
+                              "volume": m.get("volume"), "playing": bool(m.get("playing"))})
+        else:
+            # By address: "first bluez_input" also matched the headphones' own microphone.
+            phone_mac = st.get("phone_mac", "").upper()
+            node = next((o for o in nodes_of(self.objs, "Stream/Output/Audio") + nodes_of(self.objs, "Audio/Source")
+                         if phone_mac and str(node_props(o).get("api.bluez5.address", "")).upper() == phone_mac),
+                        None)
+            vol, mute = node_volume(node) if node else (None, False)
+            self.phone.master.update("PHONE", "over Bluetooth, through the laptop" + bat, vol, mute)
+            self.phone_node = node
+            pl = self.avrcp.player(phone_mac) if phone_mac and st.get("phone_linked") else None
+            self.phone_player = pl
+            if pl:
+                items.append({"id": "avrcp", "app": "Phone", "volume": None,
+                              "title": " · ".join(x for x in (pl["title"], pl["artist"]) if x),
+                              "playing": pl["status"] == "playing"})
+        self.phone.sync(items, self.phone_callbacks)
+
+    def phone_callbacks(self, rid):
+        def toggle():
+            if rid == "avrcp":
+                pl = self.phone_player
+                if pl:
+                    self.avrcp.toggle(pl["path"], pl["status"] == "playing")
+            else:
+                ctl(op="toggle", id=rid.split(":", 1)[1])
+
+        def volume(v):
+            if rid != "avrcp":
+                ctl(op="volume", id=rid.split(":", 1)[1], value=v)
+        return toggle, volume, None
+
+
+# ---------------------------------------------------------------- demo data (screenshots/tests)
+
+def demo_art():
+    path = "/tmp/tandem-demo-art.png"
+    if not os.path.exists(path):
+        from gi.repository import GdkPixbuf
+        w = 64
+        data = bytearray()
+        for y in range(w):
+            for x in range(w):
+                data += bytes((200 - y, 80 + x, 120 + (x + y) // 2))
+        pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(data)), GdkPixbuf.Colorspace.RGB, False, 8, w, w, w * 3)
+        pb.savev(path, "png", [], [])
+    return path
+
+
+def demo_state():
+    return {"owner": "phone", "streaming": True, "phone": True, "prefer": "phone", "phone_volume": 0.53,
+            "phone_media_access": True,
+            "phone_media": [{"id": "com.spotify.music", "app": "Spotify", "title": "When I Was Your Man",
+                             "artist": "Bruno Mars", "playing": True, "pos": 84000, "dur": 213827},
+                            {"id": "org.schabi.newpipe", "app": "NewPipe", "title": "How Bluetooth Works",
+                             "artist": "", "playing": False}], "updated": time.time()}
+
+
+def demo_objs():
+    def node(i, props, vol):
+        return {"id": i, "type": "PipeWire:Interface:Node", "info": {"props": props,
+                "params": {"Props": [{"channelVolumes": [vol ** 3, vol ** 3], "mute": False}]}}}
+    return [
+        {"type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"},
+         "metadata": [{"key": "default.audio.sink", "value": {"name": "tandem_via_phone"}},
+                      {"key": "default.audio.source", "value": {"name": "alsa_input.mic"}}]},
+        node(40, {"node.name": "tandem_via_phone", "media.class": "Audio/Sink",
+                  "node.description": "Headphones (via phone)"}, 0.8),
+        node(41, {"node.name": "alsa_output.speaker", "media.class": "Audio/Sink",
+                  "node.description": "Speakers"}, 0.6),
+        node(45, {"node.name": "alsa_input.mic", "media.class": "Audio/Source",
+                  "node.description": "Digital Microphone"}, 0.9),
+        node(51, {"node.name": "Firefox", "media.class": "Stream/Output/Audio", "application.name": "Firefox",
+                  "application.process.binary": "firefox", "media.name": "AudioStream"}, 0.72),
+        node(63, {"node.name": "spotify", "media.class": "Stream/Output/Audio", "application.name": "spotify",
+                  "application.process.binary": "spotify", "media.name": "Spotify"}, 0.4),
+    ]
+
+
+def demo_players():
+    return [{"bus": "org.mpris.MediaPlayer2.firefox.instance_1_77", "identity": "Mozilla Firefox", "entry": "firefox",
+             "title": "Lofi Girl - beats to relax/study to", "artist": "", "status": "Playing", "can_pause": True}]
+
+
+
+def main():
+    if "--setup-waybar" in sys.argv:
+        return setup_waybar()
+    if "--restore-waybar" in sys.argv:
+        return restore_waybar()
+    if "--toggle" in sys.argv:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            s.sendto(b"toggle", SOCK)
+        except OSError:
+            sys.exit("tandem-mixer isn't running")
+        return
+    if GtkLayerShell is None and not DEMO and not os.environ.get("TANDEM_MIXER_TEST"):
+        sys.exit("needs gtk-layer-shell: sudo apt install gir1.2-gtklayershell-0.1")
+    m = Mixer()
+
+    def quit_(*_):
+        try:
+            os.unlink(INDICATOR)
+        except OSError:
+            pass
+        try:
+            if os.stat(SOCK).st_ino == m.sock_ino:  # not a newer instance's socket
+                os.unlink(SOCK)
+        except OSError:
+            pass
+        m.sock.close()
+        Gtk.main_quit()
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ValueError, ImportError):
+        add_signal = GLib.unix_signal_add
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        add_signal(GLib.PRIORITY_DEFAULT, sig, quit_)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

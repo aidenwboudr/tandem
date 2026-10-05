@@ -1,0 +1,11 @@
+[Unit]
+Description=tandem-mixer: hover mixer on waybar's audio module (replaces pavucontrol)
+After=tandem.service
+
+[Service]
+ExecStart=%h/.local/bin/tandem-mixer
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

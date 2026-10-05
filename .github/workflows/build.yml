@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  computer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        run: pipx run pyflakes laptop/tandemd laptop/tandem laptop/tests
+      - name: End-to-end test (a scripted phone against the daemon)
+        run: /usr/bin/python3 laptop/tests/fake_phone.py
+      - name: Installer syntax
+        run: bash -n laptop/install.sh
+
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      # The runner image already has the Android SDK (ANDROID_HOME); Gradle fetches the platform it needs.
+      - name: Signing key (releases only; set the secrets to sign with your key)
+        if: startsWith(github.ref, 'refs/tags/') && env.KEYSTORE_B64 != ''
+        env:
+          KEYSTORE_B64: ${{ secrets.TANDEM_KEYSTORE_B64 }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+      - name: Build
+        working-directory: android
+        env:
+          TANDEM_KEYSTORE: ${{ runner.temp }}/release.jks
+          TANDEM_KEYSTORE_PASS: ${{ secrets.TANDEM_KEYSTORE_PASS }}
+        run: |
+          if [ ! -f "$TANDEM_KEYSTORE" ]; then
+            # Not a release: a throwaway key, just to prove it builds.
+            keytool -genkeypair -keystore "$TANDEM_KEYSTORE" -alias tandem -keyalg RSA -keysize 2048 \
+              -validity 1 -storepass tandem -keypass tandem -dname "CN=CI"
+            export TANDEM_KEYSTORE_PASS=tandem
+          fi
+          ./gradlew --no-daemon assembleRelease lintRelease
+          cp app/build/outputs/apk/release/app-release.apk ../tandem.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tandem-apk
+          path: tandem.apk
+      # Only a release signed with the project's key can update installed apps, so without the signing
+      # secrets a tag doesn't publish anything (attach a locally signed APK to the release by hand instead).
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/') && env.KEYSTORE_B64 != ''
+        env:
+          KEYSTORE_B64: ${{ secrets.TANDEM_KEYSTORE_B64 }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tandem.apk

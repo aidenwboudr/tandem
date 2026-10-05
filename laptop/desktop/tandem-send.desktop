@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Send to phone (Tandem)
+Comment=Send files to your phone
+Icon=phone
+Exec=tandem send %F
+NoDisplay=true
+MimeType=application/octet-stream;application/pdf;application/zip;image/png;image/jpeg;image/gif;image/webp;image/heic;video/mp4;video/quicktime;video/webm;audio/mpeg;audio/ogg;audio/flac;text/plain;text/csv;application/vnd.android.package-archive;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.text;

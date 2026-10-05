@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- English only for now; the UI is built in code. -->
+    <issue id="SetTextI18n" severity="ignore" />
+    <!-- The singletons hold the application context, not an activity. -->
+    <issue id="StaticFieldLeak" severity="ignore" />
+    <!-- Link.Pinned checks the computer's certificate against the SHA-256 pinned at Bluetooth pairing. -->
+    <issue id="CustomX509TrustManager" severity="ignore" />
+    <!-- Distributed outside the Play Store; an always-on link needs the exemption. -->
+    <issue id="BatteryLife" severity="ignore" />
+    <!-- The audio wake lock is held exactly while the headphones are on, and released in finally. -->
+    <issue id="WakelockTimeout" severity="ignore" />
+    <!-- Screenshots work with full or partial photo access alike. -->
+    <issue id="SelectedPhotoAccess" severity="ignore" />
+    <issue id="DataExtractionRules" severity="ignore" />
+</lint>
