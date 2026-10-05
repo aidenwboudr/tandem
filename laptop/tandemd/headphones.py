@@ -218,6 +218,7 @@ class Headphones:
         self.prefer = load_prefer()
         self.claim_since = None  # prefer=laptop: since when the laptop has been trying to get the headphones
         self.last_unlink_try = 0.0
+        self.unlink_logged = False
         self.pulled_until = 0.0
         self.phone_hp_linked = False
         self.last_sink_check = 0.0
@@ -398,12 +399,9 @@ class Headphones:
             if pulled and ph["transport"]:
                 if now >= self.pulled_until:
                     log("phone's audio jumped to the laptop's link: dropping it, the headphones stay on the phone")
+                    self.unlink_logged = True
                 self.pulled_until = now + PULLED_GRACE
-                if now - self.last_unlink_try > 2.0:
-                    self.last_unlink_try = now
-                    self.d.bg("unlink-phone-a2dp", bluez.dev_call, ph["path"], "DisconnectProfile", "s",
-                              bluez.A2DP_SOURCE)
-            self.unlink_phone(ph)
+            self.unlink_phone(ph, now)
             self.hp_was_connected = False
             if self.streamer.ensure(hb.get("codec", "opus")):
                 log("streaming laptop audio to the phone")
@@ -452,7 +450,7 @@ class Headphones:
             if hp and (now < self.reconnect_until or claim) and now - self.last_hp_try > 6:
                 self.last_hp_try = now
                 self.d.bg("connect-hp", bluez.dev_call, hp["path"], "Connect")
-            self.unlink_phone(ph)
+            self.unlink_phone(ph, now)
             return
 
         # The laptop has the headphones.
@@ -530,16 +528,26 @@ class Headphones:
             # audio back to the headphones.
         return ok, msg
 
-    def unlink_phone(self, ph):
+    def unlink_phone(self, ph, now):
+        """The laptop carries the phone's audio only while it has the headphones. Any other audio link from
+        the phone goes, whoever made it: after the Bluetooth link between the two drops (it does, every
+        few minutes on some adapters), BlueZ connects the phone's audio link again by itself, and Android
+        then plays to the laptop, its newest device, instead of whatever it was playing to."""
         if self.loopback:
             self.loopback.terminate()
             self.loopback = None
         # Only the audio link: the Bluetooth link itself also carries Tandem's messages.
-        if self.phone_linked_by_us and ph and ph["transport"]:
-            log("unlinking the phone's audio from the laptop")
-            self.d.bg("unlink-phone", bluez.dev_call, ph["path"], "DisconnectProfile", "s", bluez.A2DP_SOURCE)
-        if not (ph and ph["transport"]):
+        if ph and ph["transport"]:
+            if not self.unlink_logged:
+                self.unlink_logged = True
+                log("unlinking the phone's audio from the laptop" if self.phone_linked_by_us else
+                    "the phone's audio link came to the laptop by itself: dropping it")
+            if now - self.last_unlink_try > 2.0:
+                self.last_unlink_try = now
+                self.d.bg("unlink-phone", bluez.dev_call, ph["path"], "DisconnectProfile", "s", bluez.A2DP_SOURCE)
+        else:
             self.phone_linked_by_us = False
+            self.unlink_logged = False
 
     def ensure_phone_playback(self, node):
         # PipeWire plays a phone's A2DP stream straight to the default sink unless
