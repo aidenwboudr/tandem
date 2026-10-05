@@ -625,6 +625,7 @@ class Headphones:
         hb = self.hb if self.hb and time.monotonic() - self.hb["time"] < HB_TIMEOUT else None
         st = {"owner": self.owner, "phone_has_headphones": bool(hb and hb.get("hp")),
               "streaming": self.streamer.running(), "packets_sent": self.streamer.sent,
+              "packets_sent_net": self.streamer.net_path.sent, "packets_sent_bt": self.streamer.bt_path.sent,
               "phone_linked": self.phone_linked, "phone_mac": self.phone_mac, "prefer": self.prefer,
               "phone_hp_linked": self.phone_hp_linked, "headphones": self.hp_mac,
               "headphones_name": self.d.peer.get("headphones_name", "")}
