@@ -1,0 +1,40 @@
+name: Something doesn't work
+description: A feature misbehaves, pairing fails, the link drops…
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+      placeholder: Pixel 8a, Android 16
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Linux distribution and desktop
+      placeholder: Fedora 43, GNOME (Wayland)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Tandem version (app's About section)
+      placeholder: "3.0"
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `tandem status`
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`journalctl --user -u tandem --since -10min` on the computer, and if you can, `adb logcat -s Tandem` on the phone."
+      render: text

@@ -1,0 +1,4 @@
+@font-face { font-family: 'Familjen Grotesk'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('fonts/familjen-grotesk-400-700.woff2') format('woff2'); }
+@font-face { font-family: 'Atkinson Hyperlegible'; font-style: normal; font-weight: 400; font-display: swap; src: url('fonts/atkinson-hyperlegible-400.woff2') format('woff2'); }
+@font-face { font-family: 'Atkinson Hyperlegible'; font-style: normal; font-weight: 700; font-display: swap; src: url('fonts/atkinson-hyperlegible-700.woff2') format('woff2'); }
+@font-face { font-family: 'Martian Mono'; font-style: normal; font-weight: 400 600; font-display: swap; src: url('fonts/martian-mono-400-600.woff2') format('woff2'); }

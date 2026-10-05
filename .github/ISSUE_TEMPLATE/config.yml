@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Privacy and permissions
+    url: https://github.com/aidenwboudr/tandem/blob/main/PRIVACY.md
+    about: What the app can see, and why.
