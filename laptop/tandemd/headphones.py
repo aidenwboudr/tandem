@@ -279,13 +279,12 @@ class Headphones:
         self.prefer = to
         log(f"switch: the {to} carries the audio now")
         if self.owner in ("laptop", "phone") and self.owner != to:
-            # What plays now should still play once it's over (see check_switch), and the headphones
-            # connecting and dropping shouldn't each pop up: one notification for the whole switch.
+            # What plays now should still play once it's over (see check_switch). One notification for the
+            # whole switch: blueman's pop-ups are off while Tandem runs (Daemon.quiet_blueman).
             media = (self.hb or {}).get("media") or []
             self.switch = {"to": to, "started": time.monotonic(), "landed": None, "resumed": [],
                            "playing": desktop.mpris_playing(),
                            "phone_playing": [m["id"] for m in media if m.get("playing") and m.get("id")]}
-            self.d.bg("hush-blueman", quietly, desktop.hush_blueman)
         self.d.notify(f"Switching to the {to}", title="Headphones")
         self.send_ack()
 
@@ -327,7 +326,6 @@ class Headphones:
 
     def end_switch(self):
         self.switch = None
-        self.d.bg("unhush-blueman", quietly, desktop.unhush_blueman)
 
     def resume(self, players, phone_players):
         """Plays again what a switch paused: only what was playing when it started."""
@@ -572,12 +570,6 @@ class Headphones:
         return st
 
 
-def quietly(fn):
-    """For Daemon.bg, which wants (ok, message) back."""
-    fn()
-    return True, ""
-
-
 def load_prefer():
     try:
         with open(PREFER) as f:
@@ -598,7 +590,6 @@ def save_prefer(v):
 
 
 def cleanup(hp_mac):
-    desktop.unhush_blueman()  # a switch was under way
     if not hp_mac:
         return
     dev = (bluez.devices() or {}).get(hp_mac)

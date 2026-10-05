@@ -63,6 +63,7 @@ if [ ! -f "$cfg" ]; then
 # OPUS_BITRATE=160000
 # NOTIFY=1                # 0 = no desktop notifications from Tandem
 # HEADPHONES=             # Bluetooth address; normally learned from the phone
+# BLUEMAN_POPUPS=0        # 1 keeps blueman's Connected/Disconnected pop-ups (off while Tandem runs)
 EOF
 fi
 
