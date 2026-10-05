@@ -367,7 +367,9 @@ class Link:
             return
         role = h.get("role")
         if role == "audio":
-            s.settimeout(3)  # a vanished phone must not stall the audio pump for minutes
+            # A vanished phone must not hold the connection for minutes, but a network stall of a few seconds
+            # mustn't end it either: reconnecting over a flaky path cut the sound for longer than the stall.
+            s.settimeout(15)
             old, self.audio = self.audio, conn
             if old:
                 old.close()

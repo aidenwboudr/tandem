@@ -167,8 +167,31 @@ def main():
         log.close()
         if fails:
             print(open(os.path.join(tmp, "daemon.log")).read())
+    audio_paths()
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
     sys.exit(1 if fails else 0)
+
+
+def audio_paths():
+    """Laptop audio goes over the network and Bluetooth at once: a stalled path must not hold up the other."""
+    import threading
+    from tandemd.headphones import PATH_QUEUE, AudioPath
+    stall, got = threading.Event(), []
+    stuck = AudioPath("stuck", lambda h, p: stall.wait())
+    fine = AudioPath("fine", lambda h, p: got.append(h["s"]) or True)
+    t0 = time.monotonic()
+    for seq in range(50):  # frames are 20 ms apart; 2 ms here
+        stuck.put({"s": seq}, b"")
+        fine.put({"s": seq}, b"")
+        time.sleep(0.002)
+    check("a stalled audio path doesn't block the sender", time.monotonic() - t0 < 1)
+    deadline = time.monotonic() + 2
+    while len(got) < 50 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check("…and the other path sends every frame", got == list(range(50)))
+    check("…while the stalled one keeps only the newest frames", len(stuck.q) <= PATH_QUEUE
+          and stuck.q[-1][0]["s"] == 49)
+    stall.set()
 
 
 if __name__ == "__main__":

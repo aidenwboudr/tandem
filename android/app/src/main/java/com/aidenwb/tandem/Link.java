@@ -53,6 +53,7 @@ import javax.net.ssl.X509TrustManager;
  * computer connects to it; that's where pairing happens, and small messages go that way when there's no
  * network. Network: this phone connects to the computer's TLS server (its certificate pinned at pairing)
  * for a control connection, an audio connection while laptop audio plays here, and one per file.
+ * Laptop audio also comes over Bluetooth: each frame plays from whichever link brings it first.
  *
  * Incoming messages are handed to {@link Features} on one thread ("tandem-link"), in order.
  */
@@ -135,6 +136,9 @@ final class Link {
     volatile long lastNetTryAt;
     private volatile AudioSink audioSink;
     private volatile boolean audioConnecting;
+    // The newest audio frame played (both links carry every frame): its stream, sequence number and when.
+    private int audioId, audioSeq;
+    private long audioAt;
 
     private Link(Context ctx) {
         this.ctx = ctx;
@@ -661,6 +665,9 @@ final class Link {
                         Log.i(TAG, "link: the computer unpaired");
                         handler.post(() -> unpair(false));
                         return;
+                    case "a":
+                        audioFrame(f, c.via);
+                        break;
                     default:
                         String via = c.via;
                         handler.post(() -> Features.get(ctx).onMessage(via, f));
@@ -701,18 +708,39 @@ final class Link {
                 try {
                     f = Proto.read(a.in);
                 } catch (SocketTimeoutException e) {
-                    // Nothing playing on the laptop for 5 s: keep the connection, but let the player rest.
+                    // Nothing on this connection for 5 s: keep it. If Bluetooth brought nothing either, nothing
+                    // is playing on the laptop: let the player rest.
                     AudioSink s = audioSink;
-                    if (s != null) s.onAudio(-1, null, 0, 0);
+                    if (s != null && SystemClock.elapsedRealtime() - audioAt > 5000) s.onAudio(-1, null, 0, 0);
                     continue;
                 }
-                AudioSink s = audioSink;
-                if (s != null && "a".equals(f.type())) s.onAudio(f.h.optInt("c"), f.payload, 0, f.payload.length);
+                if ("a".equals(f.type())) audioFrame(f, a.via);
             }
         } catch (IOException e) {
             Log.d(TAG, "audio: " + e.getMessage());
         }
         drop(a);
+    }
+
+    /** Plays a frame unless the other link already brought it (or a newer one). Frames from a laptop that
+     *  doesn't number its streams (`id`) come over one link only, and all play. */
+    private void audioFrame(Proto.Frame f, String via) {
+        AudioSink s = audioSink;
+        if (s == null) return;
+        synchronized (this) {
+            long now = SystemClock.elapsedRealtime();
+            if (f.h.has("id")) {
+                int id = f.h.optInt("id"), seq = (int) f.h.optLong("s");
+                if (id == audioId && seq - audioSeq <= 0 && now - audioAt < 30_000) return; // seen it
+                if (now - audioAt > 500 && audioAt > 0) {
+                    Log.d(TAG, "audio: " + (now - audioAt) + " ms gap, resumed via " + via);
+                }
+                audioId = id;
+                audioSeq = seq;
+            }
+            audioAt = now;
+            s.onAudio(f.h.optInt("c"), f.payload, 0, f.payload.length); // in order, whichever link it came on
+        }
     }
 
     private static boolean sleep(long ms) {

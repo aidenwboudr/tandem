@@ -328,7 +328,8 @@ public class LinkService extends Service {
             JSONObject hb = Proto.msg("hb").put("v", Proto.VERSION).put("hp", hp).put("hp_linked", hp || hpLinked)
                     .put("hpname", headphones == null ? "" : headphones)
                     .put("hpaddr", linked != null ? linked.getAddress() : hpOut != null ? hpOut.getAddress() : "")
-                    .put("codec", Prefs.codec(this));
+                    .put("codec", Prefs.codec(this))
+                    .put("bta", true); // laptop audio may come over Bluetooth too (Link.audioFrame)
             if (Settings.on(this, "media_controls")) {
                 try {
                     media.describe(hb);

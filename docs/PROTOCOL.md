@@ -45,7 +45,10 @@ payload            header.len bytes (0 for most messages)
   a payload. The roles are:
   - `control`: all the messages below. The phone sends `ping` every 25 s, and the computer drops a
     connection that has been quiet for 90 s.
-  - `audio`: the computer sends `a {c: codec, s: seq}` frames with Opus (`c=1`) or PCM (`c=0`) payloads.
+  - `audio`: the computer sends `a {c: codec, s: seq, id: stream}` frames with Opus (`c=1`) or PCM (`c=0`)
+    payloads, 20 ms each. When the phone's `hb` says `bta`, the computer also sends the Opus frames over the
+    Bluetooth link, and the phone plays each `(id, s)` once, from whichever link brings it first. A network
+    stall (Tailscale moving between a relay and a direct path) then doesn't cut the sound.
   - `bulk`: one file transfer. With `bulk: <offer id>` the phone is taking a file the computer offered
     (`file-offer`), and the computer sends it. Without it, the phone sends one `file`. The receiver answers
     `file-ok {id}`, or `file-no {id, error}` if it won't take it.
@@ -58,7 +61,7 @@ payload            header.len bytes (0 for most messages)
 | type | direction | what |
 |---|---|---|
 | `settings {values, rev}` | both | the feature settings (see below). The higher `rev` (ms since epoch) wins. Both send theirs on connect. |
-| `hb {hp, hp_linked, hpname, hpaddr, codec, media, volume, media_access}` | phone → computer | headphone state and the phone's players. 1/s while the headphones are on the phone, otherwise every 15 s. Network only. |
+| `hb {hp, hp_linked, hpname, hpaddr, codec, bta, media, volume, media_access}` | phone → computer | headphone state and the phone's players. 1/s while the headphones are on the phone, otherwise every 15 s. Network only. |
 | `ack {owner, streaming, sent, prefer}` | computer → phone | reply to `hb` |
 | `switch {to}` | both | make "laptop" or "phone" the hub |
 | `cmd {op, id, value}` | computer → phone | media control (play pause toggle next previous volume) |

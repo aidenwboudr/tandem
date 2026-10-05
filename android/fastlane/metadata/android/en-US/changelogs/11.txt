@@ -1,0 +1,1 @@
+Laptop audio on your headphones no longer cuts out when the network hiccups: it comes over Bluetooth as well as the network, and the phone plays whichever arrives first.
