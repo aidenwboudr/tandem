@@ -18,9 +18,9 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.text.InputType;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
@@ -39,16 +39,17 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Setup (pairing with a computer) and every feature as a switch, each with what it needs to work.
- * The switches are shared with the computer: changing one here changes it there too.
+ * Setup (pairing with a computer), the link, and every feature as a switch, each with what it needs to
+ * work. The switches are shared with the computer: changing one here changes it there too. The look
+ * (Look, LinkView) follows docs/BRAND.md.
  */
 public class MainActivity extends Activity implements Settings.Listener, Link.Listener {
     static final String REPO = "https://github.com/aidenwboudr/tandem";
+    static final String SITE = "https://tandem.aidenwb.com";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<Runnable> refreshers = new ArrayList<>();
     private LinearLayout col;
-    private int accent;
 
     /** Something a feature needs that the user has to grant. */
     private abstract class Need {
@@ -126,135 +127,131 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        TypedValue tv = new TypedValue();
-        getTheme().resolveAttribute(android.R.attr.colorAccent, tv, true);
-        accent = tv.data;
         build();
     }
 
     private void build() {
         refreshers.clear();
-        int pad = dp(20);
         col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(pad, pad * 2, pad, pad * 2);
+        int pad = dp(18);
+        col.setPadding(pad, dp(12), pad, dp(32));
 
-        TextView title = text("Tandem", 28);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        col.addView(title);
-        TextView tagline = text("Your phone and your computer, working as one.", 14);
-        tagline.setAlpha(0.7f);
-        tagline.setPadding(0, dp(2), 0, dp(16));
-        col.addView(tagline);
-
-        statusCard();
-        setupCard();
+        header();
         basics();
+        setupCard();
+        linkPanel();
 
         section("Clipboard");
-        feature("clip_to_laptop", "Send my copies to the computer",
-                "Copy on the phone, paste on the computer.", null);
-        note(this::clipNote);
-        feature("clip_from_laptop", "Get the computer's copies",
-                "Copy on the computer, paste here. Images too.", null);
-        feature("clip_secrets", "Include password manager copies",
-                "Off: copies a password manager marks as secret stay on the computer.", null);
-        feature("otp_copy", "Copy sign-in codes to the computer",
-                "When a text or notification has a one-time code, it lands on the computer's clipboard.", null,
+        LinearLayout clip = group();
+        LinearLayout toPc = feature(clip, "clip_to_laptop", Look.Dir.TO_PC, "Send my copies to the computer",
+                "Copy on the phone, paste on the computer.");
+        clipNote(toPc);
+        feature(clip, "clip_from_laptop", Look.Dir.TO_PHONE, "Get the computer's copies",
+                "Copy on the computer, paste here. Images too.");
+        feature(clip, "clip_secrets", Look.Dir.TO_PHONE, "Include password manager copies",
+                "Off: copies a password manager marks as secret stay on the computer.");
+        feature(clip, "otp_copy", Look.Dir.TO_PC, "Copy sign-in codes to the computer",
+                "When a text or notification has a one-time code, it lands on the computer's clipboard.",
                 notifAccess);
 
         section("Notifications");
-        LinearLayout notif = feature("notif_mirror", "Show phone notifications on the computer",
-                "Messages, mail, reminders… Media and ongoing notifications stay here.", null, notifAccess);
+        LinearLayout nGroup = group();
+        LinearLayout notif = feature(nGroup, "notif_mirror", Look.Dir.TO_PC, "Show phone notifications on the computer",
+                "Messages, mail, reminders… Media and ongoing notifications stay here.", notifAccess);
         sub(notif, "notif_reply", "Reply from the computer", "For messaging apps that offer a reply.");
         sub(notif, "notif_dismiss_sync", "Dismiss on one, gone on both", null);
-        notif.addView(button("Choose apps not to show…", v -> pickExcluded()));
+        notif.addView(Look.button(this, "Choose apps not to show…", Look.Kind.TEXT, v -> pickExcluded()));
 
         section("Calls");
-        feature("calls", "Show calls on the computer",
-                "With buttons to silence the ringer or decline.", null,
+        LinearLayout calls = group();
+        feature(calls, "calls", Look.Dir.TO_PC, "Show calls on the computer",
+                "With buttons to silence the ringer or decline.",
                 perm("Allow phone access", Manifest.permission.READ_PHONE_STATE),
                 optional(perm("Allow declining calls", Manifest.permission.ANSWER_PHONE_CALLS)));
-        feature("call_pause_media", "Pause the computer's music during calls",
-                "And play it again when the call ends.", null,
+        feature(calls, "call_pause_media", Look.Dir.TO_PC, "Pause the computer's music during calls",
+                "And play it again when the call ends.",
                 perm("Allow phone access", Manifest.permission.READ_PHONE_STATE));
 
         section("Files and links");
-        feature("files", "Send and receive files",
+        LinearLayout files = group();
+        feature(files, "files", Look.Dir.BOTH, "Send and receive files",
                 "Share → Tandem sends to the computer's Downloads. `tandem send` on the computer puts files in "
-                        + "Downloads/Tandem here.", null);
-        feature("open_links", "Open shared links on the other device",
-                "Share a link to Tandem and it opens in the computer's browser, and the other way round.", null,
+                        + "Downloads/Tandem here.");
+        feature(files, "open_links", Look.Dir.BOTH, "Open shared links on the other device",
+                "Share a link to Tandem and it opens in the computer's browser, and the other way round.",
                 optional(overlay));
-        LinearLayout shots = feature("screenshots", "Send new screenshots to the computer",
-                "They go to its Pictures/Phone folder.", null,
+        LinearLayout shots = feature(files, "screenshots", Look.Dir.TO_PC, "Send new screenshots to the computer",
+                "They go to its Pictures/Phone folder.",
                 perm("Allow access to photos", Manifest.permission.READ_MEDIA_IMAGES));
         sub(shots, "screenshot_clipboard", "Also put them on its clipboard", null);
 
         section("Audio");
-        LinearLayout audio = feature("audio_share", "Share audio through one pair of headphones",
+        LinearLayout aGroup = group();
+        LinearLayout audio = feature(aGroup, "audio_share", Look.Dir.BOTH, "Share audio through one pair of headphones",
                 "With Bluetooth headphones on, they stay on one link and you hear both devices: whichever is "
-                        + "the hub plays the other's audio. Needs both on the same network.", null,
+                        + "the hub plays the other's audio. Needs both on the same network.",
                 perm("Allow Bluetooth", Manifest.permission.BLUETOOTH_CONNECT));
-        audio.addView(label("Headphone name contains (empty = any Bluetooth headphones)"));
-        EditText match = field(Prefs.match(this), InputType.TYPE_CLASS_TEXT);
+        audio.addView(fieldLabel("Headphone name contains"));
+        EditText match = Look.field(this, Prefs.match(this), InputType.TYPE_CLASS_TEXT);
+        match.setHint("Empty: any headphones");
         audio.addView(match);
-        Switch opus = new Switch(this);
-        opus.setText("Compress the computer's audio (off = raw, ~1.5 Mbit/s)");
+        LinearLayout opusRow = Look.row(this);
+        opusRow.setPadding(0, dp(10), 0, 0);
+        TextView opusText = Look.body(this, "Compress the computer's audio (off = raw, ~1.5 Mbit/s)", 14);
+        opusText.setTextColor(Look.color(this, R.color.ink));
+        Switch opus = Look.toggle(this);
         opus.setChecked("opus".equals(Prefs.codec(this)));
-        opus.setPadding(0, dp(8), 0, dp(8));
-        audio.addView(opus);
-        audio.addView(button("Save", v -> {
+        opusRow.addView(opusText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        opusRow.addView(opus);
+        opusRow.setOnClickListener(v -> opus.toggle());
+        audio.addView(opusRow);
+        Button save = Look.button(this, "Save", Look.Kind.LINE, null);
+        save.setOnClickListener(v -> {
             Prefs.get(this).edit().putString("match", match.getText().toString().trim())
                     .putString("codec", opus.isChecked() ? "opus" : "pcm").apply();
-            v.post(() -> ((Button) v).setText("Saved"));
-        }));
-        Button hub = button("", v -> LinkService.switchHub(this, "toggle"));
-        audio.addView(hub);
-        refreshers.add(() -> {
-            long now = SystemClock.elapsedRealtime();
-            boolean can = LinkService.hpLinked && LinkService.prefer != null && now - LinkService.lastAckAt <= 5000;
-            hub.setVisibility(can ? View.VISIBLE : View.GONE);
-            if (can) hub.setText("laptop".equals(LinkService.prefer)
-                    ? "Hub: " + Pairing.name(this) + " · make the phone the hub"
-                    : "Hub: phone · make " + Pairing.name(this) + " the hub");
+            save.setText("Saved");
         });
-        feature("media_controls", "Control phone media from the computer",
-                "Play/pause and volume from its bar, and what's playing.", null, notifAccess);
-        LinearLayout play = feature("play_opens_app", "Headphone play button opens my music app",
-                "If the app is closed, pressing play opens it and starts playing.", null, overlay, notifAccess);
-        Button pickApp = button("", v -> pickPlayApp());
+        audio.addView(Look.buttons(this, save));
+        feature(aGroup, "media_controls", Look.Dir.TO_PHONE, "Control phone media from the computer",
+                "Play/pause and volume from its bar, and what's playing.", notifAccess);
+        LinearLayout play = feature(aGroup, "play_opens_app", Look.Dir.LOCAL, "Headphone play button opens my music app",
+                "If the app is closed, pressing play opens it and starts playing.", overlay, notifAccess);
+        Button pickApp = Look.button(this, "", Look.Kind.TEXT, v -> pickPlayApp());
         play.addView(pickApp);
         refreshers.add(() -> pickApp.setText("App: " + appLabel(Settings.str(this, "play_app")) + " · change"));
 
         section("Phone status");
-        LinearLayout bat = feature("battery", "Battery on the computer",
-                "Shows the phone's (and headphones') battery there, and warns when it's low.", null);
-        bat.addView(label("Warn below (%)"));
-        EditText low = field(String.valueOf(Settings.num(this, "battery_low")), InputType.TYPE_CLASS_NUMBER);
+        LinearLayout sGroup = group();
+        LinearLayout bat = feature(sGroup, "battery", Look.Dir.TO_PC, "Battery on the computer",
+                "Shows the phone's (and headphones') battery there, and warns when it's low.");
+        bat.addView(fieldLabel("Warn below this much (%)"));
+        EditText low = numberField(String.valueOf(Settings.num(this, "battery_low")));
         low.setOnFocusChangeListener((v, has) -> {
             if (!has) Settings.set(this, "battery_low", low.getText().toString().trim());
         });
         bat.addView(low);
-        LinearLayout find = feature("find_phone", "Find my phone",
-                "The computer can make this phone ring at full volume, even on silent (`tandem ring`).", null);
-        find.addView(button("Find my computer", v -> FindPhone.ringComputer(this)));
-        feature("dnd_sync", "Sync Do Not Disturb",
+        LinearLayout find = feature(sGroup, "find_phone", Look.Dir.BOTH, "Find my phone",
+                "The computer can make this phone ring at full volume, even on silent (`tandem ring`).");
+        find.addView(Look.button(this, "Find my computer", Look.Kind.TEXT, v -> FindPhone.ringComputer(this)));
+        feature(sGroup, "dnd_sync", Look.Dir.BOTH, "Sync Do Not Disturb",
                 "Turn it on or off on one and the other follows (GNOME, mako, swaync and dunst on the computer).",
-                null, dndAccess);
+                dndAccess);
 
         section("Remote control");
-        feature("remote_input", "Type on the phone from the computer",
-                "Run `tandem type` on the computer, then pick the Tandem keyboard here.", null, keyboard);
-        feature("screen_mirror", "Mirror this screen on the computer",
+        LinearLayout rGroup = group();
+        feature(rGroup, "remote_input", Look.Dir.TO_PHONE, "Type on the phone from the computer",
+                "Run `tandem type` on the computer, then pick the Tandem keyboard here.", keyboard);
+        feature(rGroup, "screen_mirror", Look.Dir.TO_PC, "Mirror this screen on the computer",
                 "`tandem screen` shows and controls the phone (needs scrcpy on the computer, and Wireless "
-                        + "debugging on here: Settings → System → Developer options).", null);
+                        + "debugging on here: Settings → System → Developer options).");
 
         section("Security");
-        LinearLayout lock = feature("lock_on_leave", "Lock the computer when I walk away",
-                "When this phone leaves Bluetooth range, the computer locks its screen.", null);
-        lock.addView(label("After (seconds)"));
-        EditText delay = field(String.valueOf(Settings.num(this, "lock_delay")), InputType.TYPE_CLASS_NUMBER);
+        LinearLayout secGroup = group();
+        LinearLayout lock = feature(secGroup, "lock_on_leave", Look.Dir.TO_PC, "Lock the computer when I walk away",
+                "When this phone leaves Bluetooth range, the computer locks its screen.");
+        lock.addView(fieldLabel("After this many seconds"));
+        EditText delay = numberField(String.valueOf(Settings.num(this, "lock_delay")));
         delay.setOnFocusChangeListener((v, has) -> {
             if (!has) Settings.set(this, "lock_delay", delay.getText().toString().trim());
         });
@@ -263,124 +260,298 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
         footer();
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setClipToPadding(false);
         scroll.addView(col);
+        // Android 15 draws apps edge to edge: keep the content clear of the status and navigation bars.
+        scroll.setOnApplyWindowInsetsListener((v, in) -> {
+            android.graphics.Insets bars = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime());
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return WindowInsets.CONSUMED;
+        });
         setContentView(scroll);
         refresh();
     }
 
-    // ------------------------------------------------------------ cards
+    // ------------------------------------------------------------ the top
 
-    private void statusCard() {
-        LinearLayout card = card();
-        TextView line = text("", 17);
-        TextView detail = text("", 14);
-        detail.setAlpha(0.75f);
-        detail.setPadding(0, dp(4), 0, 0);
-        card.addView(line);
-        card.addView(detail);
-        LinearLayout row = new LinearLayout(this);
-        Button sendClip = button("Send clipboard", v -> startActivity(ClipSync.grabIntent(this)
-                .putExtra(ClipGrabActivity.EXTRA_MANUAL, true)));
-        Button ring = button("Find computer", v -> FindPhone.ringComputer(this));
-        row.addView(sendClip);
-        row.addView(ring);
-        card.addView(row);
+    private void header() {
+        LinearLayout row = Look.row(this);
+        row.setPadding(0, dp(8), 0, dp(18));
+        Look.Mark mark = new Look.Mark(this);
+        row.addView(mark, new LinearLayout.LayoutParams(dp(40), dp(20)));
+        TextView name = Look.heading(this, "Tandem", 26);
+        name.setTypeface(Typeface.create(getResources().getFont(R.font.familjen), 700, false));
+        name.setPadding(dp(10), 0, 0, dp(2));
+        row.addView(name);
+        col.addView(row);
+    }
+
+    /** Bluetooth + notifications and running in the background: asked for before anything else. */
+    private void basics() {
+        LinearLayout card = Look.card(this, Look.color(this, R.color.phone_wash));
+        card.addView(Look.label(this, "This phone", Look.color(this, R.color.phone_ink)));
+        TextView head = Look.heading(this, "Tandem needs a yes from you first", 19);
+        head.setPadding(0, dp(4), 0, dp(2));
+        card.addView(head);
+        Button perms = Look.need(this, "Allow Bluetooth and notifications (needed)", v -> requestPermissions(new String[]{
+                Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS}, 1));
+        Button battery = Look.need(this, "Let Tandem run in the background (recommended)", v -> startActivity(new Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName()))));
+        perms.setBackground(Look.pressable(this, Look.round(Look.color(this, R.color.paper), dp(999)), dp(999)));
+        battery.setBackground(Look.pressable(this, Look.round(Look.color(this, R.color.paper), dp(999)), dp(999)));
+        card.addView(perms);
+        card.addView(battery);
         col.addView(card);
         refreshers.add(() -> {
-            Link link = Link.get(this);
-            boolean paired = Pairing.paired(this);
-            card.setVisibility(paired ? View.VISIBLE : View.GONE);
-            row.setVisibility(link.connected() ? View.VISIBLE : View.GONE);
-            ring.setVisibility(Settings.on(this, "find_phone") ? View.VISIBLE : View.GONE);
-            sendClip.setVisibility(Settings.on(this, "clip_to_laptop") ? View.VISIBLE : View.GONE);
-            if (!paired) return;
-            String name = Pairing.name(this);
-            if (!link.connected()) {
-                line.setText("○  " + name + " isn't connected");
-                detail.setText("It connects over Bluetooth when it's nearby with Tandem running, or over the "
-                        + "network when you're on the same Wi-Fi (or Tailscale)."
-                        + (link.error != null ? "\n" + link.error : ""));
-                return;
-            }
-            line.setText("●  Connected to " + name);
-            StringBuilder d = new StringBuilder();
-            d.append(link.bt != null ? "Bluetooth ✓" : "Bluetooth ✗").append("   ")
-                    .append(link.net != null ? "Network ✓ (" + link.net.addr + ")" : "Network ✗ (big files and audio wait)");
-            if (Status.computerBattery >= 0) {
-                d.append("\nBattery ").append(Status.computerBattery).append("%").append(Status.computerCharging ? " · charging" : "");
-            }
-            if (LinkService.headphones != null) d.append("\nHeadphones: ").append(LinkService.headphones);
-            if (LinkService.error != null) d.append("\n").append(LinkService.error);
-            detail.setText(d);
+            boolean ok = checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+            boolean bg = getSystemService(PowerManager.class).isIgnoringBatteryOptimizations(getPackageName());
+            perms.setVisibility(ok ? View.GONE : View.VISIBLE);
+            battery.setVisibility(bg ? View.GONE : View.VISIBLE);
+            card.setVisibility(ok && bg ? View.GONE : View.VISIBLE);
+            head.setText(ok ? "One more thing for this phone" : "Tandem needs a yes from you first");
         });
     }
 
     private void setupCard() {
-        LinearLayout card = card();
-        TextView head = text("Set up", 18);
-        head.setTypeface(Typeface.DEFAULT_BOLD);
-        card.addView(head);
-        TextView steps = text("1.  Install Tandem on your Linux computer (see " + REPO + ").\n"
-                + "2.  Pair this phone with the computer in Bluetooth settings, like any device.\n"
-                + "3.  Keep this screen open. The computer finds this phone and asks to pair; say yes here.", 14);
-        steps.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout card = Look.card(this, Look.color(this, R.color.paper));
+        LinearLayout steps = new LinearLayout(this);
+        steps.setOrientation(LinearLayout.VERTICAL);
+        TextView head = Look.heading(this, "Set up", 22);
+        steps.addView(head);
+        String[] lines = {
+                "Install Tandem on your Linux computer (tandem.aidenwb.com).",
+                "Pair this phone with the computer in Bluetooth settings, like any device.",
+                "Keep this screen open. The computer finds this phone and asks to pair; say yes here."};
+        for (int i = 0; i < lines.length; i++) steps.addView(step(i + 1, lines[i]));
+        steps.addView(Look.buttons(this,
+                Look.button(this, "Bluetooth settings", Look.Kind.INK,
+                        v -> startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))),
+                Look.button(this, "Instructions", Look.Kind.LINE,
+                        v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SITE))))));
         card.addView(steps);
-        LinearLayout row = new LinearLayout(this);
-        row.addView(button("Bluetooth settings", v -> startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))));
-        row.addView(button("Instructions", v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(REPO)))));
-        card.addView(row);
-
-        LinearLayout ask = new LinearLayout(this);
-        ask.setOrientation(LinearLayout.VERTICAL);
-        ask.setPadding(0, dp(12), 0, 0);
-        TextView q = text("", 16);
-        q.setTypeface(Typeface.DEFAULT_BOLD);
-        ask.addView(q);
-        TextView warn = text("Only allow it if it's your computer. It will be able to use the features you turn on below.", 13);
-        warn.setAlpha(0.75f);
-        ask.addView(warn);
-        LinearLayout yn = new LinearLayout(this);
-        yn.addView(button("Allow", v -> Link.get(this).answerPairing(true)));
-        yn.addView(button("Deny", v -> Link.get(this).answerPairing(false)));
-        ask.addView(yn);
-        card.addView(ask);
         col.addView(card);
+
+        // The pairing question, when a computer asks.
+        LinearLayout ask = Look.card(this, Look.color(this, R.color.paper));
+        GradientDrawable askBg = Look.round(Look.color(this, R.color.paper), dp(16));
+        askBg.setStroke(dp(2), Look.color(this, R.color.pc));
+        ask.setBackground(askBg);
+        ask.addView(Look.label(this, "A computer wants to pair", Look.color(this, R.color.pc_ink)));
+        TextView q = Look.heading(this, "", 24);
+        q.setPadding(0, dp(6), 0, dp(4));
+        ask.addView(q);
+        ask.addView(Look.body(this, "Only allow it if it's your computer. It will be able to use the features you "
+                + "turn on below.", 14));
+        ask.addView(Look.buttons(this,
+                Look.button(this, "Allow", Look.Kind.PHONE, v -> Link.get(this).answerPairing(true)),
+                Look.button(this, "Deny", Look.Kind.LINE, v -> Link.get(this).answerPairing(false))));
+        col.addView(ask);
         refreshers.add(() -> {
             Link.PendingPair p = Link.get(this).pending;
-            card.setVisibility(!Pairing.paired(this) || p != null ? View.VISIBLE : View.GONE);
+            card.setVisibility(!Pairing.paired(this) && p == null ? View.VISIBLE : View.GONE);
             ask.setVisibility(p != null ? View.VISIBLE : View.GONE);
             if (p != null) q.setText("Pair with " + p.name + "?");
         });
     }
 
-    private void basics() {
-        Button perms = button("Allow Bluetooth + notifications (needed)", v -> requestPermissions(new String[]{
-                Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS}, 1));
-        Button battery = button("Let Tandem run in the background (recommended)", v -> startActivity(new Intent(
-                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName()))));
-        col.addView(perms);
-        col.addView(battery);
+    private View step(int n, String s) {
+        LinearLayout r = Look.row(this);
+        r.setGravity(Gravity.TOP);
+        r.setPadding(0, dp(12), 0, 0);
+        TextView num = Look.text(this, String.valueOf(n), 12, Look.mono(this, true), Look.color(this, R.color.ink));
+        num.setGravity(Gravity.CENTER);
+        num.setBackground(Look.round(Look.color(this, R.color.bg), dp(999)));
+        r.addView(num, new LinearLayout.LayoutParams(dp(26), dp(26)));
+        TextView t = Look.body(this, s, 15);
+        t.setTextColor(Look.color(this, R.color.ink));
+        t.setPadding(dp(12), dp(2), 0, 0);
+        r.addView(t, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        return r;
+    }
+
+    /** The link: this phone, the computer, the two lanes between them, and what's on the other end. */
+    private void linkPanel() {
+        LinearLayout card = Look.card(this, Look.color(this, R.color.paper));
+        card.setPadding(dp(18), dp(18), dp(18), dp(18));
+
+        LinearLayout names = Look.row(this);
+        LinearLayout me = new LinearLayout(this);
+        me.setOrientation(LinearLayout.VERTICAL);
+        me.addView(dotLabel("This phone", R.color.phone));
+        TextView meName = Look.ellipsize(Look.heading(this, "", 16));
+        me.addView(meName);
+        LinearLayout them = new LinearLayout(this);
+        them.setOrientation(LinearLayout.VERTICAL);
+        them.setGravity(Gravity.END);
+        them.addView(dotLabel("Computer", R.color.pc));
+        TextView themName = Look.ellipsize(Look.heading(this, "", 16));
+        themName.setGravity(Gravity.END);
+        them.addView(themName);
+        names.addView(me, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        names.addView(them, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(names);
+
+        LinkView lanes = new LinkView(this);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(10);
+        lp.bottomMargin = dp(6);
+        card.addView(lanes, lp);
+
+        TextView line = Look.heading(this, "", 22);
+        card.addView(line);
+        TextView detail = Look.body(this, "", 14);
+        detail.setPadding(0, dp(4), 0, 0);
+        card.addView(detail);
+
+        LinearLayout facts = new LinearLayout(this);
+        facts.setOrientation(LinearLayout.VERTICAL);
+        facts.setPadding(0, dp(6), 0, 0);
+        Fact battery = fact(facts, "Computer battery");
+        Fact phones = fact(facts, "Headphones");
+        Fact via = fact(facts, "Network address");
+        card.addView(facts);
+
+        // The hub, as on the site: which device the headphones stay on.
+        LinearLayout hub = Look.row(this);
+        hub.setPadding(dp(4), dp(4), dp(4), dp(4));
+        hub.setBackground(Look.round(Look.color(this, R.color.bg), dp(999)));
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        hlp.topMargin = dp(14);
+        TextView hubLbl = Look.label(this, "The hub", Look.color(this, R.color.mute));
+        hubLbl.setPadding(dp(12), 0, dp(6), 0);
+        hub.addView(hubLbl);
+        TextView hubPhone = hubOption("Phone", "phone");
+        TextView hubPc = hubOption("Computer", "laptop");
+        hub.addView(hubPhone, new LinearLayout.LayoutParams(0, dp(38), 1));
+        hub.addView(hubPc, new LinearLayout.LayoutParams(0, dp(38), 1));
+        card.addView(hub, hlp);
+
+        Button sendClip = Look.button(this, "Send clipboard", Look.Kind.INK, v -> startActivity(ClipSync.grabIntent(this)
+                .putExtra(ClipGrabActivity.EXTRA_MANUAL, true)));
+        Button ring = Look.button(this, "Find computer", Look.Kind.LINE, v -> FindPhone.ringComputer(this));
+        LinearLayout actions = Look.buttons(this, sendClip, ring);
+        actions.setPadding(0, dp(16), 0, 0);
+        card.addView(actions);
+        col.addView(card);
+
         refreshers.add(() -> {
-            boolean ok = checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
-            perms.setVisibility(ok ? View.GONE : View.VISIBLE);
-            battery.setVisibility(getSystemService(PowerManager.class).isIgnoringBatteryOptimizations(getPackageName())
-                    ? View.GONE : View.VISIBLE);
+            Link link = Link.get(this);
+            boolean paired = Pairing.paired(this);
+            card.setVisibility(paired ? View.VISIBLE : View.GONE);
+            if (!paired) return;
+            boolean up = link.connected();
+            String name = Pairing.name(this);
+            meName.setText(Pairing.myName(this));
+            themName.setText(name);
+            lanes.set(link.bt != null, link.net != null);
+            actions.setVisibility(up ? View.VISIBLE : View.GONE);
+            ring.setVisibility(Settings.on(this, "find_phone") ? View.VISIBLE : View.GONE);
+            sendClip.setVisibility(Settings.on(this, "clip_to_laptop") ? View.VISIBLE : View.GONE);
+            if (!up) {
+                line.setText("Not connected");
+                detail.setText("It connects over Bluetooth when it's nearby with Tandem running, or over the "
+                        + "network when you're on the same Wi-Fi (or Tailscale)."
+                        + (link.error != null ? "\n" + link.error : ""));
+                detail.setVisibility(View.VISIBLE);
+                facts.setVisibility(View.GONE);
+                hub.setVisibility(View.GONE);
+                return;
+            }
+            line.setText(link.net != null ? "Connected" : "Connected over Bluetooth");
+            String d = link.net == null ? "Big files and audio wait for a shared network." : "";
+            if (LinkService.error != null) d += (d.isEmpty() ? "" : "\n") + LinkService.error;
+            detail.setText(d);
+            detail.setVisibility(d.isEmpty() ? View.GONE : View.VISIBLE);
+            battery.set(Status.computerBattery >= 0
+                    ? Status.computerBattery + "%" + (Status.computerCharging ? " · charging" : "") : null);
+            phones.set(LinkService.headphones);
+            via.set(link.net != null ? link.net.addr : null);
+            facts.setVisibility(View.VISIBLE);
+
+            long now = SystemClock.elapsedRealtime();
+            boolean can = LinkService.hpLinked && LinkService.prefer != null && now - LinkService.lastAckAt <= 5000;
+            hub.setVisibility(can ? View.VISIBLE : View.GONE);
+            if (can) {
+                boolean pc = "laptop".equals(LinkService.prefer);
+                pick(hubPhone, !pc, R.color.phone);
+                pick(hubPc, pc, R.color.pc);
+            }
         });
+    }
+
+    private TextView hubOption(String label, String to) {
+        TextView t = Look.text(this, label.toUpperCase(Locale.ROOT), 11, Look.mono(this, true), Look.color(this, R.color.mute));
+        t.setLetterSpacing(0.05f);
+        t.setGravity(Gravity.CENTER);
+        t.setOnClickListener(v -> {
+            if (!to.equals(LinkService.prefer)) LinkService.switchHub(this, to);
+            refresh();
+        });
+        return t;
+    }
+
+    private void pick(TextView t, boolean on, int colorId) {
+        t.setSelected(on);
+        t.setTextColor(on ? 0xFFFFFFFF : Look.color(this, R.color.mute));
+        t.setBackground(Look.pressable(this, on ? Look.round(Look.color(this, colorId), dp(999)) : null, dp(999)));
+    }
+
+    private TextView dotLabel(String s, int colorId) {
+        TextView t = Look.label(this, "●  " + s, Look.color(this, R.color.mute));
+        android.text.SpannableString sp = new android.text.SpannableString(t.getText());
+        sp.setSpan(new android.text.style.ForegroundColorSpan(Look.color(this, colorId)), 0, 1, 0);
+        t.setText(sp);
+        return t;
+    }
+
+    /** One "label: value" line under the link; hidden when there's nothing to say. */
+    private final class Fact {
+        final LinearLayout row;
+        final TextView value;
+
+        Fact(LinearLayout row, TextView value) {
+            this.row = row;
+            this.value = value;
+        }
+
+        void set(String v) {
+            row.setVisibility(v == null ? View.GONE : View.VISIBLE);
+            if (v != null) value.setText(v);
+        }
+    }
+
+    private Fact fact(LinearLayout parent, String label) {
+        LinearLayout r = Look.row(this);
+        r.setPadding(0, dp(8), 0, 0);
+        TextView l = Look.label(this, label, Look.color(this, R.color.mute));
+        r.addView(l, new LinearLayout.LayoutParams(dp(132), LinearLayout.LayoutParams.WRAP_CONTENT));
+        TextView v = Look.ellipsize(Look.text(this, "", 14, Look.body(this, true), Look.color(this, R.color.ink)));
+        r.addView(v, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        parent.addView(r);
+        return new Fact(r, v);
     }
 
     private void footer() {
         section("About");
-        TextView about = text("", 13);
-        about.setAlpha(0.7f);
-        col.addView(about);
-        Button unpair = button("Unpair from this computer", v -> new AlertDialog.Builder(this)
+        LinearLayout card = Look.card(this, Look.color(this, R.color.paper));
+        TextView about = Look.text(this, "", 12, Look.mono(this, false), Look.color(this, R.color.ink));
+        about.setLineSpacing(0, 1.3f);
+        card.addView(about);
+        TextView me = Look.body(this, "", 14);
+        me.setPadding(0, dp(6), 0, 0);
+        card.addView(me);
+        Button unpair = Look.button(this, "Unpair", Look.Kind.LINE, v -> new AlertDialog.Builder(this)
                 .setTitle("Unpair from " + Pairing.name(this) + "?")
                 .setMessage("Tandem stops working with it until you pair again.")
                 .setPositiveButton("Unpair", (d, w) -> Link.get(this).unpair(true))
                 .setNegativeButton("Cancel", null).show());
-        col.addView(unpair);
-        col.addView(button("Source code and help", v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(REPO)))));
+        Button source = Look.button(this, "Source and help", Look.Kind.LINE,
+                v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(REPO))));
+        card.addView(Look.buttons(this, unpair, source));
+        col.addView(card);
         refreshers.add(() -> {
             unpair.setVisibility(Pairing.paired(this) ? View.VISIBLE : View.GONE);
             String v;
@@ -389,7 +560,9 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
             } catch (PackageManager.NameNotFoundException e) {
                 v = "?";
             }
-            about.setText("Tandem " + v + " · free software (GPL-3.0)\nThis phone: " + Pairing.myName(this));
+            about.setText("Tandem " + v + "\nFree software, GPL-3.0");
+            me.setText("This phone is called " + Pairing.myName(this) + " on the computer."
+                    + (Pairing.paired(this) ? " Paired with " + Pairing.name(this) + "." : ""));
         });
     }
 
@@ -412,15 +585,52 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
         };
     }
 
-    /** A feature's switch, its description, buttons for what it still needs, and room for its options. */
-    private LinearLayout feature(String key, String title, String summary, Runnable onChange, Need... needs) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(0, dp(10), 0, dp(6));
-        Switch sw = new Switch(this);
-        sw.setText(title);
-        sw.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+    /** A section's features share one paper card, with a rule between them. */
+    private LinearLayout group() {
+        LinearLayout g = Look.card(this, Look.color(this, R.color.paper));
+        g.setPadding(0, dp(2), 0, dp(2));
+        col.addView(g);
+        return g;
+    }
+
+    /**
+     * A feature: which way it sends things, its title and description, the switch, buttons for what it still
+     * needs, and room for its options (shown while it's on). Tapping anywhere on the row flips the switch.
+     */
+    private LinearLayout feature(LinearLayout group, String key, Look.Dir dir, String title, String summary, Need... needs) {
+        if (group.getChildCount() > 0) group.addView(Look.divider(this, dp(60)));
+        LinearLayout row = Look.row(this);
+        row.setGravity(Gravity.TOP);
+        row.setPadding(dp(16), dp(14), dp(14), dp(14));
+
+        Look.Badge badge = new Look.Badge(this, dir);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(dp(28), dp(28));
+        blp.topMargin = dp(1);
+        row.addView(badge, blp);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(14), 0, dp(10), 0);
+        TextView t = Look.text(this, title, 16, Look.body(this, true), Look.color(this, R.color.ink));
+        body.addView(t);
+        TextView s = Look.body(this, summary, 14);
+        s.setPadding(0, dp(3), 0, 0);
+        body.addView(s);
+        List<Button> grants = new ArrayList<>();
+        for (Need n : needs) {
+            Button g = Look.need(this, n.label, v -> n.grant());
+            body.addView(g);
+            grants.add(g);
+        }
+        LinearLayout opts = new LinearLayout(this);
+        opts.setOrientation(LinearLayout.VERTICAL);
+        opts.setPadding(0, dp(4), 0, 0);
+        body.addView(opts);
+        row.addView(body, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+
+        Switch sw = Look.toggle(this);
         sw.setChecked(Settings.on(this, key));
+        sw.setContentDescription(title);
         sw.setOnCheckedChangeListener((b, on) -> {
             if (on == Settings.on(this, key)) return;
             Settings.set(this, key, on);
@@ -428,83 +638,90 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
                 n.grant();
                 break;
             }
-            if (onChange != null) onChange.run();
             refresh();
         });
         row.addView(sw);
-        TextView s = text(summary, 13);
-        s.setAlpha(0.7f);
-        row.addView(s);
-        List<Button> grants = new ArrayList<>();
-        for (Need n : needs) {
-            Button g = button(n.label, v -> n.grant());
-            g.setTextColor(accent);
-            row.addView(g);
-            grants.add(g);
-        }
-        LinearLayout opts = new LinearLayout(this);
-        opts.setOrientation(LinearLayout.VERTICAL);
-        opts.setPadding(dp(16), 0, 0, 0);
-        row.addView(opts);
-        col.addView(row);
+        View top = clickable(row, sw);
+        group.addView(top);
         refreshers.add(() -> {
             boolean on = Settings.on(this, key);
             if (sw.isChecked() != on) sw.setChecked(on);
             for (int i = 0; i < needs.length; i++) grants.get(i).setVisibility(on && !needs[i].met() ? View.VISIBLE : View.GONE);
-            opts.setVisibility(on ? View.VISIBLE : View.GONE);
+            opts.setVisibility(on && opts.getChildCount() > 0 ? View.VISIBLE : View.GONE);
         });
         return opts;
     }
 
+    /** The row flips its switch when tapped, with pressed feedback over the whole row. */
+    private View clickable(LinearLayout row, Switch sw) {
+        row.setBackground(Look.pressable(this, null, 0));
+        row.setOnClickListener(v -> sw.toggle());
+        return row;
+    }
+
     private void sub(LinearLayout parent, String key, String title, String summary) {
-        Switch sw = new Switch(this);
-        sw.setText(summary == null ? title : title + "\n" + summary);
-        sw.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        sw.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout r = Look.row(this);
+        r.setPadding(0, dp(10), 0, dp(4));
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        TextView t = Look.text(this, title, 14.5f, Look.body(this, false), Look.color(this, R.color.ink));
+        text.addView(t);
+        if (summary != null) text.addView(Look.body(this, summary, 13));
+        r.addView(text, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Switch sw = Look.toggle(this);
         sw.setChecked(Settings.on(this, key));
+        sw.setContentDescription(title);
         sw.setOnCheckedChangeListener((b, on) -> {
             if (on != Settings.on(this, key)) Settings.set(this, key, on);
         });
-        parent.addView(sw);
+        r.addView(sw);
+        r.setOnClickListener(v -> sw.toggle());
+        parent.addView(r);
         refreshers.add(() -> {
             if (sw.isChecked() != Settings.on(this, key)) sw.setChecked(Settings.on(this, key));
         });
     }
 
-    private void note(java.util.function.Supplier<String> text) {
-        TextView t = text("", 13);
-        t.setPadding(0, 0, 0, dp(4));
-        col.addView(t);
+    /** Under "Send my copies": the counters, and whether every copy goes over by itself (and how to get there). */
+    private void clipNote(LinearLayout parent) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(10), dp(12), dp(12));
+        box.setBackground(Look.round(Look.color(this, R.color.bg), dp(10)));
+        TextView counts = Look.text(this, "", 12, Look.mono(this, false), Look.color(this, R.color.ink));
+        counts.setLineSpacing(0, 1.3f);
+        box.addView(counts);
+        TextView how = Look.body(this, "", 13.5f);
+        how.setPadding(0, dp(6), 0, 0);
+        how.setTextIsSelectable(true); // the adb command
+        box.addView(how);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        parent.addView(box, lp);
         refreshers.add(() -> {
-            String s = Settings.on(this, "clip_to_laptop") ? text.get() : "";
-            t.setText(s);
-            t.setVisibility(s.isEmpty() ? View.GONE : View.VISIBLE);
+            long now = SystemClock.elapsedRealtime();
+            counts.setText("↑ " + ClipSync.toLaptop + " sent" + ago(now, ClipSync.lastToLaptopAt)
+                    + "\n↓ " + ClipSync.fromLaptop + " received" + ago(now, ClipSync.lastFromLaptopAt));
+            String s;
+            if (!ClipSync.canWatch(this)) {
+                s = "Android only lets the app on screen read the clipboard, so copies go over when you tap Send "
+                        + "clipboard (in the notification) or share text to Tandem. To send every copy automatically, "
+                        + "run this once from a computer with adb:\nadb shell pm grant " + getPackageName()
+                        + " android.permission.READ_LOGS";
+            } else if (!android.provider.Settings.canDrawOverlays(this)) {
+                s = "Every copy can go over automatically once Display over other apps is allowed.";
+            } else if (ClipSync.approved) {
+                s = "Every copy goes over automatically.";
+            } else if (ClipSync.watching) {
+                s = "Almost: allow Tandem access to device logs when Android asks (it only looks for \"something "
+                        + "was copied\"). Switch away and back if the prompt is gone.";
+            } else {
+                s = "Not watching for copies. Close and reopen Tandem, and allow access to device logs.";
+            }
+            if (ClipSync.lastError != null) s += "\n" + ClipSync.lastError;
+            how.setText(s);
         });
-    }
-
-    private String clipNote() {
-        long now = SystemClock.elapsedRealtime();
-        StringBuilder s = new StringBuilder();
-        s.append("↑ ").append(ClipSync.toLaptop).append(" sent").append(ago(now, ClipSync.lastToLaptopAt))
-                .append("   ↓ ").append(ClipSync.fromLaptop).append(" received").append(ago(now, ClipSync.lastFromLaptopAt))
-                .append("\n");
-        if (!ClipSync.canWatch(this)) {
-            s.append("Android only lets the app on screen read the clipboard, so copies go over when you tap Send "
-                    + "clipboard (in the notification) or share text to Tandem. To send every copy automatically, "
-                    + "run this once from a computer with adb:\nadb shell pm grant " + getPackageName()
-                    + " android.permission.READ_LOGS");
-        } else if (!android.provider.Settings.canDrawOverlays(this)) {
-            s.append("Every copy can go over automatically once Display over other apps is allowed.");
-        } else if (ClipSync.approved) {
-            s.append("Every copy goes over automatically.");
-        } else if (ClipSync.watching) {
-            s.append("Almost: allow Tandem access to device logs when Android asks (it only looks for \"something "
-                    + "was copied\"). Switch away and back if the prompt is gone.");
-        } else {
-            s.append("Not watching for copies. Close and reopen Tandem, and allow access to device logs.");
-        }
-        if (ClipSync.lastError != null) s.append("\n").append(ClipSync.lastError);
-        return s.toString();
     }
 
     private void pickPlayApp() {
@@ -617,58 +834,22 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
     // ------------------------------------------------------------ views
 
     private void section(String s) {
-        TextView t = text(s.toUpperCase(Locale.ROOT), 12);
-        t.setTextColor(accent);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setLetterSpacing(0.08f);
-        t.setPadding(0, dp(26), 0, dp(2));
+        TextView t = Look.heading(this, s, 21);
+        t.setPadding(dp(4), dp(22), 0, dp(10));
         col.addView(t);
     }
 
-    private LinearLayout card() {
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(dp(16), dp(14), dp(16), dp(10));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(16));
-        bg.setColor((accent & 0x00FFFFFF) | 0x1A000000);
-        c.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(12);
-        c.setLayoutParams(lp);
-        return c;
-    }
-
-    private TextView text(String s, int sp) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+    private TextView fieldLabel(String s) {
+        TextView t = Look.text(this, s, 14, Look.body(this, true), Look.color(this, R.color.ink));
+        t.setPadding(0, dp(14), 0, 0);
         return t;
     }
 
-    private TextView label(String s) {
-        TextView t = text(s, 13);
-        t.setAlpha(0.7f);
-        t.setPadding(0, dp(10), 0, 0);
-        return t;
-    }
-
-    private EditText field(String value, int type) {
-        EditText e = new EditText(this);
-        e.setText(value);
-        e.setInputType(type);
-        e.setSingleLine(true);
+    private EditText numberField(String value) {
+        EditText e = Look.field(this, value, InputType.TYPE_CLASS_NUMBER);
+        e.setLayoutParams(new LinearLayout.LayoutParams(dp(96), LinearLayout.LayoutParams.WRAP_CONTENT));
+        ((LinearLayout.LayoutParams) e.getLayoutParams()).topMargin = dp(6);
         return e;
-    }
-
-    private Button button(String s, View.OnClickListener l) {
-        Button b = new Button(this, null, android.R.attr.borderlessButtonStyle);
-        b.setText(s);
-        b.setAllCaps(false);
-        b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        b.setOnClickListener(l);
-        return b;
     }
 
     private static String ago(long now, long at) {
