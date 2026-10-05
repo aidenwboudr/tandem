@@ -48,7 +48,10 @@ payload            header.len bytes (0 for most messages)
   - `audio`: the computer sends `a {c: codec, s: seq, id: stream}` frames with Opus (`c=1`) or PCM (`c=0`)
     payloads, 20 ms each. When the phone's `hb` says `bta`, the computer also sends the Opus frames over the
     Bluetooth link, and the phone plays each `(id, s)` once, from whichever link brings it first. A network
-    stall (Tailscale moving between a relay and a direct path) then doesn't cut the sound.
+    stall (Tailscale moving between a relay and a direct path) then doesn't cut the sound. While audio comes
+    over Bluetooth the phone sends a `pong` there every 2 s: Android puts a link it hasn't sent on for 7 s into
+    sniff mode, which can't carry audio. When nothing has come from either link for 1.5 s, the phone opens a
+    fresh audio connection (the computer drops the old one) instead of waiting out TCP's retry backoff.
   - `bulk`: one file transfer. With `bulk: <offer id>` the phone is taking a file the computer offered
     (`file-offer`), and the computer sends it. Without it, the phone sends one `file`. The receiver answers
     `file-ok {id}`, or `file-no {id, error}` if it won't take it.
