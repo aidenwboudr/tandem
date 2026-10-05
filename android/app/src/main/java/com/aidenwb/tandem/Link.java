@@ -454,11 +454,20 @@ final class Link {
                     serve(c); // until it drops
                 }
             }
-            delay = worked ? NET_RETRY_MIN : Math.min(delay * 2, NET_RETRY_MAX);
+            // A connection that worked and dropped is mostly a blip: try again right away. Waiting the usual
+            // 15 s left laptop audio off that long (it needs this connection).
+            long wait;
+            if (worked) {
+                delay = NET_RETRY_MIN;
+                wait = 1000;
+            } else {
+                wait = delay;
+                delay = Math.min(delay * 2, NET_RETRY_MAX);
+            }
             synchronized (netKick) {
                 if (!kicked) {
                     try {
-                        netKick.wait(Pairing.paired(ctx) ? delay : 60_000);
+                        netKick.wait(Pairing.paired(ctx) ? wait : 60_000);
                     } catch (InterruptedException e) {
                         return;
                     }
