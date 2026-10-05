@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 
-from .config import RUNTIME, log
+from .config import CONFIG_DIR, RUNTIME, log
 
 NOTIF_DEST = ["--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications"]
 
@@ -221,9 +221,79 @@ def pause_all():
 
 
 def resume(names):
+    """Plays the ones that are paused now; returns those."""
+    resumed = []
     for name in names:
-        if mpris_status(name) == "Paused":
-            mpris_call(name, "Play")
+        if mpris_status(name) == "Paused" and mpris_call(name, "Play"):
+            resumed.append(name)
+    return resumed
+
+
+def mpris_playing():
+    """This computer's players that are playing. Not mpris-proxy's: those stand for Bluetooth devices (the
+    phone, the headphones), and Play on one goes to the device."""
+    out = []
+    for name in mpris_players():
+        if mpris_status(name) != "Playing":
+            continue
+        pid = re.search(r"(\d+)", _busctl_user("call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                               "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", name) or "")
+        try:
+            with open(f"/proc/{pid.group(1)}/comm") as f:
+                if f.read().strip() == "mpris-proxy":
+                    continue
+        except (AttributeError, OSError):
+            pass
+        out.append(name)
+    return out
+
+
+# ---------------------------------------------------------------- blueman's connection pop-ups
+
+BLUEMAN_KEY = ["org.blueman.general", "plugin-list"]
+# Its plugin list from before. blueman keeps the setting for good, so this outlives a crash and a reboot.
+BLUEMAN_HUSHED = os.path.join(CONFIG_DIR, "blueman-hushed")
+
+
+def _gsettings(*args):
+    try:
+        r = subprocess.run(["gsettings", *args], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def hush_blueman():
+    """blueman pops "Connected"/"Disconnected" for every device, and a hub switch connects and drops the
+    headphones on purpose. Its notifier plugin is turned off until unhush_blueman(). Only if it's loaded:
+    one the user turned off stays off."""
+    if os.path.exists(BLUEMAN_HUSHED):
+        return
+    loaded = _busctl_user("call", "org.blueman.Applet", "/org/blueman/Applet", "org.blueman.Applet", "QueryPlugins")
+    if '"ConnectionNotifier"' not in (loaded or ""):
+        return
+    before = _gsettings("get", *BLUEMAN_KEY)
+    if before is None:
+        return
+    items = [i for i in re.findall(r"'([^']*)'", before) if i.lstrip("!") != "ConnectionNotifier"]
+    with open(BLUEMAN_HUSHED, "w") as f:
+        f.write(before + "\n")
+    _gsettings("set", *BLUEMAN_KEY, repr(items + ["!ConnectionNotifier"]))
+
+
+def unhush_blueman():
+    """Undoes hush_blueman(), also one a crash left behind."""
+    try:
+        with open(BLUEMAN_HUSHED) as f:
+            before = f.read().strip()
+    except OSError:
+        return
+    items = [i for i in re.findall(r"'([^']*)'", before) if i.lstrip("!") != "ConnectionNotifier"]
+    # The applet only acts on names in the list: name the plugin to load it again, then put the list back.
+    _gsettings("set", *BLUEMAN_KEY, repr(items + ["ConnectionNotifier"]))
+    time.sleep(0.5)
+    _gsettings("set", *BLUEMAN_KEY, before)
+    os.unlink(BLUEMAN_HUSHED)
 
 
 # ---------------------------------------------------------------- session lock

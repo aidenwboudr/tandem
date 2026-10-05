@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 
-from . import bluez
+from . import bluez, desktop
 from .config import PREFER, log
 
 HB_TIMEOUT = 5.0  # heartbeats arrive every 1 s while the headphones are on the phone
@@ -35,6 +35,13 @@ PHONE_AUTH_ERRORS = ("key-missing", "AuthenticationFailed", "AuthenticationRejec
 PHONE_LINK_DELAY = 8.0  # at power-on the phone may be claiming the headphones too; let it win first
 CLAIM_TIMEOUT = 30.0  # switched to the laptop but it can't reach the headphones: let the phone carry on
 UNLINK_RETRY = 10.0  # switching to the phone: how often to drop the laptop's audio link to it
+# Handing the audio over: let the streams follow the new default sink this long before the old one goes.
+# WirePlumber (linking.pause-playback) pauses every player still playing into a sink that's removed.
+HANDOVER_DELAY = 1.0
+SWITCH_TIMEOUT = CLAIM_TIMEOUT + 15  # a switch that hasn't landed by then has failed
+# After a switch has landed, resume what it paused anyway (a player that wasn't following the default
+# sink, a headphone button) this many seconds later, twice.
+RESUME_AFTER = (2.0, 6.0)
 SINK_NAME = "tandem_via_phone"
 CODEC_PCM, CODEC_OPUS = 0, 1
 
@@ -211,6 +218,8 @@ class Headphones:
         self.phone_linked = False
         self.blocked_by_us = False
         self.hp_battery = None
+        self.switch = None  # a hub switch under way (see set_prefer)
+        self.handover_at = 0.0  # when the new default sink was picked (HANDOVER_DELAY)
         self.streamer = Streamer(d.link, int(d.cfg["OPUS_BITRATE"]), "Headphones (via phone)")
 
     @property
@@ -259,8 +268,15 @@ class Headphones:
             return
         self.prefer = to
         log(f"switch: the {to} carries the audio now")
-        self.d.notify({"laptop": "Switching to the laptop · phone audio will come through it",
-                       "phone": "Switching to the phone · laptop audio will go through it"}[to], title="Headphones")
+        if self.owner in ("laptop", "phone") and self.owner != to:
+            # What plays now should still play once it's over (see check_switch), and the headphones
+            # connecting and dropping shouldn't each pop up: one notification for the whole switch.
+            media = (self.hb or {}).get("media") or []
+            self.switch = {"to": to, "started": time.monotonic(), "landed": None, "resumed": [],
+                           "playing": desktop.mpris_playing(),
+                           "phone_playing": [m["id"] for m in media if m.get("playing") and m.get("id")]}
+            self.d.bg("hush-blueman", quietly, desktop.hush_blueman)
+        self.d.notify(f"Switching to the {to}", title="Headphones")
         self.send_ack()
 
     def set_owner(self, owner):
@@ -268,9 +284,54 @@ class Headphones:
             return
         self.owner = owner
         log("owner ->", owner)
+        if not self.switch:  # a switch said "Switching to ..." already, and check_switch speaks up if it fails
+            self.notify_owner()
+
+    def notify_owner(self):
         self.d.notify({"phone": "On the phone · laptop audio goes through it",
                        "laptop": "On the laptop · phone audio comes through it",
-                       None: "Off · nothing shared"}[owner], title="Headphones")
+                       None: "Off · nothing shared"}[self.owner], title="Headphones")
+
+    def check_switch(self, now):
+        sw = self.switch
+        if not sw:
+            return
+        if not sw["landed"]:
+            # On the laptop it has landed once the phone's audio comes here too (or can't).
+            if self.owner == sw["to"] and (sw["to"] == "phone" or self.phone_linked or not self.phone_hp_linked
+                                           or self.phone_needs_pairing):
+                sw["landed"] = now
+                log(f"switch: on the {sw['to']} after {now - sw['started']:.1f} s")
+            elif now - sw["started"] > SWITCH_TIMEOUT or self.prefer != sw["to"]:
+                log(f"switch to the {sw['to']} didn't land: on {self.owner or 'neither'}")
+                self.end_switch()
+                if self.prefer == sw["to"]:
+                    self.notify_owner()
+            return
+        due = [t for t in RESUME_AFTER if now - sw["landed"] >= t and t not in sw["resumed"]]
+        if due:
+            sw["resumed"] += due
+            self.d.bg("resume", self.resume, sw["playing"], sw["phone_playing"])
+        if len(sw["resumed"]) == len(RESUME_AFTER):
+            self.end_switch()
+
+    def end_switch(self):
+        self.switch = None
+        self.d.bg("unhush-blueman", quietly, desktop.unhush_blueman)
+
+    def resume(self, players, phone_players):
+        """Plays again what a switch paused: only what was playing when it started."""
+        resumed = desktop.resume(players)
+        hb = self.hb
+        if hb and time.monotonic() - hb["time"] < HB_TIMEOUT and self.d.settings["media_controls"]:
+            media = {m.get("id"): m for m in hb.get("media") or []}
+            for pkg in phone_players:
+                if pkg in media and not media[pkg].get("playing") \
+                        and self.d.link.send({"t": "cmd", "op": "play", "id": pkg}, via="net"):
+                    resumed.append(pkg)
+        if resumed:
+            log("switch: resumed " + ", ".join(resumed))
+        return True, ""
 
     def off(self, devs):
         """Audio sharing is turned off (or not set up): give everything back."""
@@ -318,6 +379,22 @@ class Headphones:
 
         if phone_owns:
             self.set_owner("phone")
+            self.unlink_phone(ph)
+            self.hp_was_connected = False
+            if self.streamer.ensure(hb.get("codec", "opus")):
+                log("streaming laptop audio to the phone")
+                self.sink_defaulted = False
+                self.handover_at = now
+            if not self.sink_defaulted:
+                n = find_node(SINK_NAME)
+                if n:
+                    set_default_sink(n["id"])
+                    self.sink_defaulted = True
+                    self.handover_at = now
+            # Drop the headphones once the laptop's streams have moved to the phone (HANDOVER_DELAY); if the
+            # sink never shows up, after a few seconds anyway.
+            if now - self.handover_at < (HANDOVER_DELAY if self.sink_defaulted else 3.0):
+                return
             if hp and not hp["blocked"] and "connect-hp" in self.d.busy:
                 # Blocking a device in the middle of Connect segfaults bluetoothd (5.85, seen twice).
                 # Cancel the connect and block once it has returned.
@@ -328,16 +405,6 @@ class Headphones:
                 self.blocked_by_us = True
             elif hp and hp["connected"]:
                 self.d.bg("disconnect-hp", bluez.dev_call, hp["path"], "Disconnect")
-            self.unlink_phone(ph)
-            if self.streamer.ensure(hb.get("codec", "opus")):
-                log("streaming laptop audio to the phone")
-                self.sink_defaulted = False
-            if not self.sink_defaulted:
-                n = find_node(SINK_NAME)
-                if n:
-                    set_default_sink(n["id"])
-                    self.sink_defaulted = True
-            self.hp_was_connected = False
             return
 
         # Switching to the laptop: keep laptop audio going through the phone until the laptop has them.
@@ -366,9 +433,6 @@ class Headphones:
 
         # The laptop has the headphones.
         self.set_owner("laptop")
-        if self.streamer.running():
-            log("the laptop has the headphones: stopping the stream to the phone")
-            self.streamer.stop()
         if not self.hp_was_connected:
             self.hp_was_connected = True
             # At power-on the phone may still be claiming them; after a switch to the laptop, link it at once.
@@ -376,6 +440,7 @@ class Headphones:
             self.phone_fails = 0  # a new session: start with short retries again
             self.reconnect_until = 0.0
             self.default_to_headphones()
+            self.handover_at = time.monotonic()
         elif now - self.last_sink_check > 5:
             self.last_sink_check = now
             # WirePlumber restarting rebuilds the sink without the headphones disconnecting, and the default
@@ -386,6 +451,10 @@ class Headphones:
                 if default_sink_name() != n["name"]:
                     log("headphones' sink came back: making it the default again")
                     set_default_sink(n["id"])
+        if self.streamer.running() and now - self.handover_at >= HANDOVER_DELAY:
+            # Only once the streams have followed the default to the headphones (see HANDOVER_DELAY).
+            log("the laptop has the headphones: stopping the stream to the phone")
+            self.streamer.stop()
         if self.phone_needs_pairing and ph and (ph["connected"] or not ph["paired"]):
             self.phone_needs_pairing = False  # it reconnected, or was removed to be paired again
             self.phone_fails = 0
@@ -477,6 +546,12 @@ class Headphones:
         return st
 
 
+def quietly(fn):
+    """For Daemon.bg, which wants (ok, message) back."""
+    fn()
+    return True, ""
+
+
 def load_prefer():
     try:
         with open(PREFER) as f:
@@ -497,6 +572,7 @@ def save_prefer(v):
 
 
 def cleanup(hp_mac):
+    desktop.unhush_blueman()  # a switch was under way
     if not hp_mac:
         return
     dev = (bluez.devices() or {}).get(hp_mac)

@@ -172,6 +172,7 @@ class Daemon:
         if devs is not None:  # BlueZ didn't answer (busy pairing, restarting): change nothing this tick
             self.check_bluez_restart(now)
             self.hp.tick(devs, now)
+            self.hp.check_switch(now)
             # The phone just connected over Bluetooth for something else: link up now, not on the next retry.
             ph = devs.get((self.peer.get("bt") or "").upper())
             if ph and ph["connected"] and not self.link.bt and self.link.bt_state == "idle":
