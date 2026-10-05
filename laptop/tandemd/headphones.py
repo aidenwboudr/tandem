@@ -54,21 +54,27 @@ def pw_nodes():
         objs = json.loads(out)
     except Exception:
         return []
+    props = {o["id"]: (o.get("info") or {}).get("props") or {} for o in objs if "id" in o}
     nodes = []
     for o in objs:
         if o.get("type") == "PipeWire:Interface:Node":
-            p = (o.get("info") or {}).get("props") or {}
+            p = props[o["id"]]
             nodes.append({"id": o["id"], "name": p.get("node.name", ""), "class": p.get("media.class", ""),
-                          "addr": str(p.get("api.bluez5.address", "")).upper()})
+                          "addr": str(p.get("api.bluez5.address", "")).upper(),
+                          "dev_addr": str(props.get(p.get("device.id"), {}).get("api.bluez5.address", "")).upper()})
     return nodes
 
 
 def bt_node(mac, classes):
     """A device's Bluetooth node, by address. Names differ between PipeWire versions
-    (bluez_output.AA_BB_... vs bluez_output.AA:BB:...), so they're not matched."""
-    for n in pw_nodes():
-        if n["addr"] == mac and n["class"] in classes:
-            return n
+    (bluez_output.AA_BB_... vs bluez_output.AA:BB:...), so they're not matched. PipeWire 1.6 puts a
+    loopback in front of a Bluetooth sink: the node with the address is "Audio/Sink/Internal", and the
+    sink apps play to only has it through its device."""
+    nodes = pw_nodes()
+    for key in ("addr", "dev_addr"):
+        for n in nodes:
+            if n[key] == mac and n["class"] in classes:
+                return n
     return None
 
 
