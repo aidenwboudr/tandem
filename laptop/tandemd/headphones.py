@@ -35,6 +35,9 @@ PHONE_AUTH_ERRORS = ("key-missing", "AuthenticationFailed", "AuthenticationRejec
 PHONE_LINK_DELAY = 8.0  # at power-on the phone may be claiming the headphones too; let it win first
 CLAIM_TIMEOUT = 30.0  # switched to the laptop but it can't reach the headphones: let the phone carry on
 UNLINK_RETRY = 10.0  # switching to the phone: how often to drop the laptop's audio link to it
+# On the phone, its audio jumped to the laptop's audio link (see `pulled` in tick): after dropping that link,
+# keep the headphones on the phone this long while Android moves back to them.
+PULLED_GRACE = 5.0
 # Handing the audio over: let the streams follow the new default sink this long before the old one goes.
 # WirePlumber (linking.pause-playback) pauses every player still playing into a sink that's removed.
 HANDOVER_DELAY = 1.0
@@ -215,6 +218,7 @@ class Headphones:
         self.prefer = load_prefer()
         self.claim_since = None  # prefer=laptop: since when the laptop has been trying to get the headphones
         self.last_unlink_try = 0.0
+        self.pulled_until = 0.0
         self.phone_hp_linked = False
         self.last_sink_check = 0.0
         self.phone_linked_by_us = False
@@ -380,11 +384,27 @@ class Headphones:
             # The laptop takes the headphones even while the phone plays to them; it only lets the phone
             # carry on if it can't reach them.
             phone_owns = phone_active and now - self.claim_since > CLAIM_TIMEOUT
+            pulled = False
         else:
-            phone_owns = phone_active
+            # On the phone, and its audio went to the laptop's audio link while its headphones stayed
+            # connected. That's the Bluetooth link between the two dropping and coming back: BlueZ reconnects
+            # the phone's audio link by itself and Android plays to the newest device. Taking the headphones
+            # for it and switching back moved them every time the link blipped (2026-10-05, every 20-40 s
+            # for minutes). The phone hasn't let go: keep them there and drop that audio link again.
+            pulled = (self.owner == "phone" and not phone_active and self.phone_hp_linked
+                      and bool(ph and (ph["transport"] or now < self.pulled_until)))
+            phone_owns = phone_active or pulled
 
         if phone_owns:
             self.set_owner("phone")
+            if pulled and ph["transport"]:
+                if now >= self.pulled_until:
+                    log("phone's audio jumped to the laptop's link: dropping it, the headphones stay on the phone")
+                self.pulled_until = now + PULLED_GRACE
+                if now - self.last_unlink_try > 2.0:
+                    self.last_unlink_try = now
+                    self.d.bg("unlink-phone-a2dp", bluez.dev_call, ph["path"], "DisconnectProfile", "s",
+                              bluez.A2DP_SOURCE)
             self.unlink_phone(ph)
             self.hp_was_connected = False
             if self.streamer.ensure(hb.get("codec", "opus")):
