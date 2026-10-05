@@ -22,6 +22,9 @@ HEADER_MAX = 64 * 1024
 BT_MAX = 4 * 1024 * 1024  # payloads bigger than this wait for the network (Bluetooth does ~100-200 KB/s)
 NET_IDLE = 90.0  # the phone pings every 25 s
 BT_PING = 20.0  # we ping over Bluetooth; an idle RFCOMM link otherwise drops after a minute or so
+# A Bluetooth read wakes this often to see whether its connection was closed meanwhile: closing an RFCOMM
+# socket from another thread (a failed send) doesn't wake a read that's waiting, and the link stayed down.
+BT_WAKE = 5.0
 PAIR_WAIT = 120.0  # how long the phone's "use Tandem with this computer?" prompt may take
 DENY_HOLD = 3600.0  # after a "Deny" (or "paired with another computer"), leave that phone alone this long...
 MISSED_HOLD = 120.0  # ...but ask again soon if nobody answered (`tandem pair` asks right away)
@@ -31,33 +34,39 @@ PAYLOAD_MAX = {"clip": 64 * 1024 * 1024, "art": 1 << 20, "notif-icon": 1 << 20, 
 NO_PAYLOAD = {}
 
 
-def recv_exact(sock, n):
+def recv_exact(sock, n, alive=None):
+    """Reads n bytes. With `alive`, a read timeout only ends it once alive() says the connection is done."""
     buf = bytearray()
     while len(buf) < n:
-        chunk = sock.recv(min(n - len(buf), 1 << 16))
+        try:
+            chunk = sock.recv(min(n - len(buf), 1 << 16))
+        except (socket.timeout, TimeoutError):
+            if alive is None or not alive():
+                raise
+            continue
         if not chunk:
             raise ConnectionError("closed")
         buf += chunk
     return bytes(buf)
 
 
-def recv_header(sock):
-    n = int.from_bytes(recv_exact(sock, 4), "big")
+def recv_header(sock, alive=None):
+    n = int.from_bytes(recv_exact(sock, 4, alive), "big")
     if n <= 0 or n > HEADER_MAX:
         raise ValueError(f"header of {n} bytes")
-    h = json.loads(recv_exact(sock, n))
+    h = json.loads(recv_exact(sock, n, alive))
     if not isinstance(h, dict):
         raise ValueError("header isn't an object")
     return h
 
 
-def recv_frame(sock, limits=None):
-    h = recv_header(sock)
+def recv_frame(sock, limits=None, alive=None):
+    h = recv_header(sock, alive)
     size = int(h.get("len") or 0)
     cap = (limits or PAYLOAD_MAX).get(h.get("t"), 0)
     if size < 0 or size > cap:
         raise ValueError(f"{h.get('t')}: payload of {size} bytes")
-    return h, recv_exact(sock, size) if size else b""
+    return h, recv_exact(sock, size, alive) if size else b""
 
 
 def frame_header(header, size):
@@ -415,9 +424,11 @@ class Link:
         try:
             conn.send(self.settings.as_message())
             conn.send({"t": "addrs", "addrs": self.addrs, "port": self.port})
-            conn.sock.settimeout(NET_IDLE if via == "net" else None)
+            # Bluetooth sends time out too then: one stuck that long means the link is gone.
+            conn.sock.settimeout(NET_IDLE if via == "net" else BT_WAKE)
+            alive = None if via == "net" else lambda: not conn.closed and not self.stop
             while not self.stop:
-                h, p = recv_frame(conn.sock)
+                h, p = recv_frame(conn.sock, alive=alive)
                 t = h.get("t")
                 if t == "ping":
                     conn.send({"t": "pong"})

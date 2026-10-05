@@ -89,6 +89,7 @@ final class Link {
         final DataInputStream in;
         final OutputStream out;
         final long openedAt = SystemClock.elapsedRealtime();
+        volatile long sentAt;
         volatile boolean closed;
 
         Conn(String via, String addr, Closeable sock, InputStream in, OutputStream out) {
@@ -101,6 +102,7 @@ final class Link {
 
         synchronized void send(JSONObject h, byte[] payload) throws IOException {
             Proto.write(out, h, payload);
+            sentAt = SystemClock.elapsedRealtime();
         }
 
         void close() {
@@ -667,6 +669,12 @@ final class Link {
                         return;
                     case "a":
                         audioFrame(f, c.via);
+                        // Android puts this link into sniff mode 7 s after this phone last sent anything on it
+                        // (what it receives doesn't count), and in sniff it can't keep up with audio: the sound
+                        // stopped for seconds. Saying something now and then keeps the link active.
+                        if ("bt".equals(c.via) && SystemClock.elapsedRealtime() - c.sentAt > 2000) {
+                            c.send(Proto.msg("pong"), null);
+                        }
                         break;
                     default:
                         String via = c.via;
