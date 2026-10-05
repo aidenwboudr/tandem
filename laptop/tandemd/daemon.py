@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 
-from . import bluez
+from . import bluez, desktop
 from .clipboard import Clipboard
 from .config import ART_DIR, CTL, STATE, Identity, Peer, Settings, coerce, DEFAULTS, log
 from .desktop import Notifier
@@ -37,6 +37,7 @@ class Daemon:
         self.ctl = None
         self.bluez_owner = None
         self.last_bluez_check = 0.0
+        self.last_blueman_check = 0.0
         self.handlers = {
             "hb": lambda h, p: self.hp.on_hb(h),
             "switch": lambda h, p: self.hp.set_prefer(h.get("to") or "toggle"),
@@ -166,11 +167,21 @@ class Daemon:
         if owner:
             self.bluez_owner = owner
 
+    def quiet_blueman(self, now):
+        """Keeps blueman's "Connected"/"Disconnected" pop-ups off while Tandem runs: the phone's link to
+        this computer is Tandem's business, and a hub switch connects and drops the headphones on purpose.
+        Retried, since blueman-applet may come up after Tandem (or be restarted, see above)."""
+        if self.cfg["BLUEMAN_POPUPS"] == "1" or desktop.blueman_hushed() or now - self.last_blueman_check < 30:
+            return
+        self.last_blueman_check = now
+        self.bg("hush-blueman", quietly, desktop.hush_blueman)
+
     def tick(self):
         now = time.monotonic()
         devs = bluez.devices()
         if devs is not None:  # BlueZ didn't answer (busy pairing, restarting): change nothing this tick
             self.check_bluez_restart(now)
+            self.quiet_blueman(now)
             self.hp.tick(devs, now)
             self.hp.check_switch(now)
             # The phone just connected over Bluetooth for something else: link up now, not on the next retry.
@@ -211,6 +222,8 @@ class Daemon:
             signal.signal(s, lambda *_: setattr(self, "stop", True))
         # A block left over from a crash would keep the headphones off the laptop for good.
         cleanup(self.hp.hp_mac)
+        if self.cfg["BLUEMAN_POPUPS"] == "1":
+            desktop.unhush_blueman()  # the config changed since a previous run hushed it
         self.open_ctl()
         self.link.start()
         log(f"tandem: {self.ident.name}, " + (f"paired with {self.peer.get('name')}" if self.peer else
@@ -239,6 +252,7 @@ class Daemon:
         log("stopping")
         self.link.stop = True
         self.hp.stop()
+        desktop.unhush_blueman()
         if self.clip.backend:
             self.clip.backend.stop()
         for path in (STATE, CTL):
@@ -246,6 +260,12 @@ class Daemon:
                 os.unlink(path)
             except OSError:
                 pass
+
+
+def quietly(fn):
+    """For Daemon.bg, which wants (ok, message) back."""
+    fn()
+    return True, ""
 
 
 def restart_blueman():

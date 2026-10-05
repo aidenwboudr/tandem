@@ -33,6 +33,9 @@ CONFIG_DEFAULTS = {
     "FILES_DIR": "", "SCREENSHOTS_DIR": "",
     # Optional: pin the headphones / the phone's Bluetooth address instead of learning them.
     "HEADPHONES": "", "PHONE": "",
+    # 1 keeps blueman's "Connected"/"Disconnected" pop-ups, which Tandem otherwise turns off while it runs
+    # (its own link to the phone would pop them up on every reconnect).
+    "BLUEMAN_POPUPS": "0",
 }
 
 # The feature settings. The phone app is where people change them; `tandem set` works too.

@@ -158,6 +158,10 @@ plus a now-playing pill in the middle of the bar. Skip it with `install.sh --no-
 | Do Not Disturb sync | ✓ | not yet | mako, swaync, dunst | dunst |
 | Lock on leave | ✓ | ✓ | with swayidle, or swaylock/hyprlock | ✓ with a logind-aware locker |
 
+With blueman, its "Connected" / "Disconnected" pop-ups are off while Tandem runs: the phone's link to the
+computer would pop them up on every reconnect, and so would a hub switch. `BLUEMAN_POPUPS=1` in
+`~/.config/tandem/config` keeps them.
+
 ## Limits
 
 - One phone and one computer. Pairing with a different computer means unpairing first.

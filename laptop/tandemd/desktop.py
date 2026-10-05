@@ -263,11 +263,16 @@ def _gsettings(*args):
         return None
 
 
+def blueman_hushed():
+    return os.path.exists(BLUEMAN_HUSHED)
+
+
 def hush_blueman():
-    """blueman pops "Connected"/"Disconnected" for every device, and a hub switch connects and drops the
-    headphones on purpose. Its notifier plugin is turned off until unhush_blueman(). Only if it's loaded:
-    one the user turned off stays off."""
-    if os.path.exists(BLUEMAN_HUSHED):
+    """blueman pops "Connected"/"Disconnected" for every device. Tandem's own Bluetooth link to the phone
+    makes the phone one of them (every reconnect is two pop-ups), and a hub switch connects and drops the
+    headphones on purpose. Its notifier plugin is turned off while Tandem runs, until unhush_blueman().
+    Only if it's loaded: one the user turned off stays off."""
+    if blueman_hushed():
         return
     loaded = _busctl_user("call", "org.blueman.Applet", "/org/blueman/Applet", "org.blueman.Applet", "QueryPlugins")
     if '"ConnectionNotifier"' not in (loaded or ""):
@@ -279,6 +284,7 @@ def hush_blueman():
     with open(BLUEMAN_HUSHED, "w") as f:
         f.write(before + "\n")
     _gsettings("set", *BLUEMAN_KEY, repr(items + ["!ConnectionNotifier"]))
+    log("blueman's connection pop-ups are off while Tandem runs (BLUEMAN_POPUPS=1 in the config keeps them)")
 
 
 def unhush_blueman():
