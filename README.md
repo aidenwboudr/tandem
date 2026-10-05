@@ -1,5 +1,9 @@
 # Tandem
 
+![Tandem: copy here, paste there](docs/images/banner.png)
+
+**[tandem.aidenwb.com](https://tandem.aidenwb.com)** · [Download the app](https://github.com/aidenwboudr/tandem/releases/latest) · [Privacy](PRIVACY.md) · [Protocol](docs/PROTOCOL.md)
+
 Your Android phone and your Linux computer, working as one. Copy on one and paste on the other, see
 your phone's notifications and calls on the computer, send files and links both ways, find your phone,
 type on it from your keyboard, and share one pair of Bluetooth headphones between both. Every feature
@@ -61,10 +65,16 @@ distribution. A few features use extra tools; the installer tells you which ones
 - **audio sharing:** PipeWire and `libopus`
 - **screen mirroring:** `scrcpy` and `adb`
 
-```sh
-git clone https://github.com/aidenwboudr/tandem
-tandem/laptop/install.sh
-```
+- **Debian, Ubuntu:** download `tandem-phone_<version>_all.deb` from the
+  [latest release](https://github.com/aidenwboudr/tandem/releases/latest), install it with
+  `sudo apt install ./tandem-phone_*_all.deb`, then run `systemctl --user enable --now tandem`.
+- **Arch:** the `tandem-phone` package from the AUR (`packaging/aur` until it's published).
+- **Anything else** (and to get the waybar extras):
+
+  ```sh
+  git clone https://github.com/aidenwboudr/tandem
+  tandem/laptop/install.sh
+  ```
 
 The installer puts `tandem` in `~/.local/bin` and starts the `tandem` user service. It also adds *Send to
 phone* to file managers. Run it again to update. If a firewall is on (firewalld, ufw), it prints the
@@ -72,8 +82,9 @@ command that lets the phone reach port 47800.
 
 ### On the phone (Android 13+)
 
-Install the APK from [Releases](https://github.com/aidenwboudr/tandem/releases), open Tandem, and allow
-Bluetooth and notifications. Then:
+Install `tandem.apk` from the [latest release](https://github.com/aidenwboudr/tandem/releases/latest), or
+add `github.com/aidenwboudr/tandem` to [Obtainium](https://github.com/ImranR98/Obtainium) to get updates.
+Open Tandem and allow Bluetooth and notifications. Then:
 
 1. Pair the phone with your computer in Bluetooth settings (if they aren't already).
 2. Keep Tandem open. Within a few seconds the computer finds it, and Tandem asks

@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: write  # attaching files to releases
+
 jobs:
   computer:
     runs-on: ubuntu-latest
@@ -59,3 +62,22 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: tandem.apk
+
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build the .deb
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then packaging/build-deb.sh "${GITHUB_REF_NAME#v}"; else packaging/build-deb.sh; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tandem-deb
+          path: dist/*.deb
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb

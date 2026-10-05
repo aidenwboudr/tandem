@@ -1,0 +1,22 @@
+Tandem links your Android phone with your Linux computer. Copy on one, paste on the other. See your phone's notifications and calls on the computer. Send files and links both ways. Share one pair of Bluetooth headphones between both devices.
+
+<b>It pairs over Bluetooth.</b> Pair the phone with the computer like any Bluetooth device, open Tandem, and accept. That's the whole setup: no accounts, no codes. Small things travel over Bluetooth, so they keep working without Wi-Fi. When both are on the same network (or Tailscale), Tandem also uses an encrypted connection for files and audio.
+
+<b>Every feature is a switch</b>, and each one asks for what it needs only when you turn it on:
+* Shared clipboard, text and images (password manager copies stay put)
+* Sign-in codes from texts go straight to the computer's clipboard
+* Phone notifications on the computer, with replies and buttons, dismissed on both
+* Incoming calls on the computer, with Silence and Decline; music pauses during calls
+* Files and links both ways ("Send to computer" in the share menu)
+* New screenshots land on the computer
+* Phone and headphone battery, with low-battery warnings
+* Find my phone (rings even on silent) and find my computer
+* Do Not Disturb sync
+* Type on the phone with the computer's keyboard
+* Mirror the phone's screen (with scrcpy)
+* Lock the computer when you walk away
+* One pair of Bluetooth headphones for both devices, without multipoint glitches
+
+<b>Privacy:</b> no servers, no analytics, no ads. The phone talks only to the computer it's paired with, over Bluetooth or TLS pinned during pairing.
+
+The computer side is a small free Python service that works on GNOME, KDE, sway, Hyprland and X11 desktops: https://tandem.aidenwb.com

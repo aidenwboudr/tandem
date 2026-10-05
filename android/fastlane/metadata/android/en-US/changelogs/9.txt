@@ -1,0 +1,1 @@
+First public release: pair over Bluetooth, every feature a switch. This update adds packages for Debian/Ubuntu and Arch on the computer side.

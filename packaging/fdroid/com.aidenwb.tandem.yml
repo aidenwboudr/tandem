@@ -1,0 +1,28 @@
+# Recipe for fdroiddata (https://gitlab.com/fdroid/fdroiddata): metadata/com.aidenwb.tandem.yml
+Categories:
+  - Connectivity
+  - System
+License: GPL-3.0-only
+AuthorName: Aiden Boudreau
+WebSite: https://tandem.aidenwb.com
+SourceCode: https://github.com/aidenwboudr/tandem
+IssueTracker: https://github.com/aidenwboudr/tandem/issues
+Changelog: https://github.com/aidenwboudr/tandem/releases
+
+AutoName: Tandem
+
+RepoType: git
+Repo: https://github.com/aidenwboudr/tandem.git
+
+Builds:
+  - versionName: 3.0.1
+    versionCode: 9
+    commit: v3.0.1
+    subdir: android/app
+    gradle:
+      - yes
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 3.0.1
+CurrentVersionCode: 9

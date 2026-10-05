@@ -1,0 +1,6 @@
+post_install() {
+  echo "Tandem: enable it for your user with  systemctl --user enable --now tandem"
+}
+post_upgrade() {
+  echo "Tandem: restart it with  systemctl --user restart tandem"
+}

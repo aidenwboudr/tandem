@@ -3,9 +3,9 @@
 import os
 import sys
 
-# Installed: ~/.local/lib/tandem/tandemd; from the repo: next to this file.
+# From the repo: next to this file; install.sh: ~/.local/lib/tandem; packages: /usr/lib/tandem.
 here = os.path.dirname(os.path.realpath(__file__))
-for d in (here, os.path.expanduser("~/.local/lib/tandem")):
+for d in (here, os.path.expanduser("~/.local/lib/tandem"), "/usr/lib/tandem"):
     if os.path.isdir(os.path.join(d, "tandemd")):
         sys.path.insert(0, d)
         break

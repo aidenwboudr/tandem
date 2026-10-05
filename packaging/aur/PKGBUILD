@@ -1,0 +1,35 @@
+# Maintainer: Aiden Boudreau <aiden.boudr@gmail.com>
+pkgname=tandem-phone
+pkgver=3.0.1
+pkgrel=1
+pkgdesc="Your Android phone and your Linux computer, working as one (clipboard, notifications, calls, files, headphones)"
+arch=('any')
+url="https://tandem.aidenwb.com"
+license=('GPL-3.0-only')
+depends=('python' 'systemd' 'bluez' 'openssl' 'iproute2')
+optdepends=('wl-clipboard: clipboard on Wayland'
+            'xclip: clipboard on X11 and GNOME'
+            'glib2: notification buttons (gdbus)'
+            'pipewire: sharing headphones'
+            'opus: compressed audio to the phone'
+            'zenity: replying to messages'
+            'scrcpy: tandem screen'
+            'android-tools: tandem screen')
+conflicts=('tandem')  # a different program that also installs /usr/bin/tandem
+install=tandem-phone.install
+source=("tandem-$pkgver.tar.gz::https://github.com/aidenwboudr/tandem/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "tandem-$pkgver"
+  install -Dm755 laptop/tandem "$pkgdir/usr/bin/tandem"
+  mkdir -p "$pkgdir/usr/lib/tandem"
+  cp -r laptop/tandemd "$pkgdir/usr/lib/tandem/"
+  mkdir -p "$pkgdir/usr/lib/systemd/user"
+  sed 's|%h/.local/bin/tandem|/usr/bin/tandem|g' laptop/tandem.service > "$pkgdir/usr/lib/systemd/user/tandem.service"
+  install -Dm644 laptop/wireplumber/51-bluez-no-handsfree-unit.conf \
+    "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/51-bluez-no-handsfree-unit.conf"
+  install -Dm644 laptop/desktop/tandem-send.desktop "$pkgdir/usr/share/applications/tandem-send.desktop"
+  install -Dm644 laptop/desktop/tandem-servicemenu.desktop "$pkgdir/usr/share/kio/servicemenus/tandem.desktop"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
