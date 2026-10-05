@@ -9,12 +9,17 @@ you hear both devices.
   headphones off            -> no audio is shared either way.
 
 Which of the two carries the other's audio when both could ("the hub") is a setting (`tandem switch`).
-Audio needs the network link; over Bluetooth alone the laptop leaves the headphones alone.
+Audio needs the network link; over Bluetooth alone the laptop leaves the headphones alone. Laptop audio
+then goes both ways at once, over the network and the Bluetooth link, and the phone plays whichever copy of
+each frame comes first: a stall on one (Tailscale moving between a relay and a direct path stops traffic
+for a few seconds) doesn't cut the sound.
 """
+import collections
 import ctypes
 import ctypes.util
 import json
 import os
+import secrets
 import subprocess
 import threading
 import time
@@ -47,6 +52,9 @@ SWITCH_TIMEOUT = CLAIM_TIMEOUT + 15  # a switch that hasn't landed by then has f
 RESUME_AFTER = (2.0, 6.0)
 SINK_NAME = "tandem_via_phone"
 CODEC_PCM, CODEC_OPUS = 0, 1
+# Audio frames (20 ms each) waiting for one path. A stalled path drops the oldest instead of holding up the
+# other; the phone would skip audio this late anyway.
+PATH_QUEUE = 10
 
 
 # ---------------------------------------------------------------- pipewire helpers
@@ -136,14 +144,47 @@ class Opus:
 
 # ---------------------------------------------------------------- laptop audio -> phone
 
+class AudioPath:
+    """One way to the phone (its audio connection, or the Bluetooth link), fed from a short queue by its own
+    thread, so one path stalling never holds up the other."""
+
+    def __init__(self, name, send):
+        self.send = send  # send(header, payload): False if there was no connection to send on
+        self.q = collections.deque(maxlen=PATH_QUEUE)
+        self.cv = threading.Condition()
+        self.sent = 0
+        threading.Thread(target=self._run, name="tandem-audio-" + name, daemon=True).start()
+
+    def put(self, header, payload):
+        with self.cv:
+            self.q.append((header, payload))
+            self.cv.notify()
+
+    def _run(self):
+        while True:
+            with self.cv:
+                while not self.q:
+                    self.cv.wait()
+                header, payload = self.q.popleft()
+            if self.send(header, payload):
+                self.sent += 1
+
+
 class Streamer:
-    """A virtual sink (pw-record posing as Audio/Sink) whose audio goes to the phone's audio connection."""
+    """A virtual sink (pw-record posing as Audio/Sink) whose audio goes to the phone: over its audio
+    connection, and over the Bluetooth link too when the phone takes audio there (`bt`)."""
 
     def __init__(self, link, bitrate, description):
         self.link, self.bitrate, self.description = link, bitrate, description
         self.proc = None
         self.codec = None
-        self.sent = 0
+        self.bt = False  # the phone said (hb `bta`) it plays audio frames that come over Bluetooth
+        self.net_path = AudioPath("net", self._send_net)
+        self.bt_path = AudioPath("bt", lambda h, p: self.link.send(h, p, via="bt"))
+
+    @property
+    def sent(self):
+        return self.net_path.sent + self.bt_path.sent
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -162,6 +203,19 @@ class Streamer:
         threading.Thread(target=self._pump, args=(self.proc, codec), daemon=True).start()
         return True
 
+    def _send_net(self, header, payload):
+        conn = self.link.audio
+        if not conn:
+            return False
+        try:
+            conn.send(header, payload)
+            return True
+        except OSError:
+            if self.link.audio is conn:  # a newer connection may have replaced it already
+                self.link.audio = None
+            conn.close()
+            return False
+
     def _pump(self, proc, codec):
         enc = None
         if codec == "opus":
@@ -171,6 +225,8 @@ class Streamer:
                 log("opus unavailable, sending PCM:", e)
         frame = 960 * 4  # 20 ms
         kind = CODEC_OPUS if enc else CODEC_PCM
+        # The phone keeps the newest frame of a stream: `seq` orders them, `id` tells a new stream (seq from 0).
+        sid = secrets.randbelow(1 << 31)
         seq = 0
         f = proc.stdout
         try:
@@ -178,15 +234,15 @@ class Streamer:
                 buf = f.read(frame)
                 if not buf or len(buf) < frame:
                     break
-                conn = self.link.audio
-                if conn:
-                    try:
-                        conn.send({"t": "a", "c": kind, "s": seq}, enc.encode(buf) if enc else buf)
-                        self.sent += 1
-                    except OSError:
-                        if self.link.audio is conn:  # a newer connection may have replaced it already
-                            self.link.audio = None
-                        conn.close()
+                # Bluetooth carries Opus only: raw PCM (1.5 Mbit/s) is more than it can take.
+                net, bt = self.link.audio, self.bt and enc and self.link.bt
+                if net or bt:
+                    header = {"t": "a", "c": kind, "s": seq, "id": sid}
+                    payload = enc.encode(buf) if enc else buf
+                    if net:
+                        self.net_path.put(header, payload)
+                    if bt:
+                        self.bt_path.put(header, payload)
                 seq = (seq + 1) & 0xFFFFFFFF
         finally:
             if enc:
@@ -260,6 +316,7 @@ class Headphones:
         if not self.hb or self.hb.get("hp") != msg.get("hp"):
             log(f"phone: headphones {'on it' if msg.get('hp') else 'not on it'} ({msg.get('hpname', '?')})")
         self.hb = msg
+        self.streamer.bt = bool(msg.get("bta"))
         self.send_ack()
 
     def send_ack(self):
@@ -568,6 +625,7 @@ class Headphones:
         hb = self.hb if self.hb and time.monotonic() - self.hb["time"] < HB_TIMEOUT else None
         st = {"owner": self.owner, "phone_has_headphones": bool(hb and hb.get("hp")),
               "streaming": self.streamer.running(), "packets_sent": self.streamer.sent,
+              "packets_sent_net": self.streamer.net_path.sent, "packets_sent_bt": self.streamer.bt_path.sent,
               "phone_linked": self.phone_linked, "phone_mac": self.phone_mac, "prefer": self.prefer,
               "phone_hp_linked": self.phone_hp_linked, "headphones": self.hp_mac,
               "headphones_name": self.d.peer.get("headphones_name", "")}

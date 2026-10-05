@@ -53,6 +53,7 @@ import javax.net.ssl.X509TrustManager;
  * computer connects to it; that's where pairing happens, and small messages go that way when there's no
  * network. Network: this phone connects to the computer's TLS server (its certificate pinned at pairing)
  * for a control connection, an audio connection while laptop audio plays here, and one per file.
+ * Laptop audio also comes over Bluetooth: each frame plays from whichever link brings it first.
  *
  * Incoming messages are handed to {@link Features} on one thread ("tandem-link"), in order.
  */
@@ -88,6 +89,7 @@ final class Link {
         final DataInputStream in;
         final OutputStream out;
         final long openedAt = SystemClock.elapsedRealtime();
+        volatile long sentAt;
         volatile boolean closed;
 
         Conn(String via, String addr, Closeable sock, InputStream in, OutputStream out) {
@@ -100,6 +102,7 @@ final class Link {
 
         synchronized void send(JSONObject h, byte[] payload) throws IOException {
             Proto.write(out, h, payload);
+            sentAt = SystemClock.elapsedRealtime();
         }
 
         void close() {
@@ -135,6 +138,10 @@ final class Link {
     volatile long lastNetTryAt;
     private volatile AudioSink audioSink;
     private volatile boolean audioConnecting;
+    // The newest audio frame played (both links carry every frame): its stream, sequence number and when.
+    private int audioId, audioSeq;
+    private volatile long audioAt;
+    private volatile long audioRetryAt; // when a fresh audio connection was last started over a stalled one
 
     private Link(Context ctx) {
         this.ctx = ctx;
@@ -447,11 +454,20 @@ final class Link {
                     serve(c); // until it drops
                 }
             }
-            delay = worked ? NET_RETRY_MIN : Math.min(delay * 2, NET_RETRY_MAX);
+            // A connection that worked and dropped is mostly a blip: try again right away. Waiting the usual
+            // 15 s left laptop audio off that long (it needs this connection).
+            long wait;
+            if (worked) {
+                delay = NET_RETRY_MIN;
+                wait = 1000;
+            } else {
+                wait = delay;
+                delay = Math.min(delay * 2, NET_RETRY_MAX);
+            }
             synchronized (netKick) {
                 if (!kicked) {
                     try {
-                        netKick.wait(Pairing.paired(ctx) ? delay : 60_000);
+                        netKick.wait(Pairing.paired(ctx) ? wait : 60_000);
                     } catch (InterruptedException e) {
                         return;
                     }
@@ -541,7 +557,7 @@ final class Link {
                 c.close();
                 return null;
             }
-            s.setSoTimeout("control".equals(role) ? (int) NET_IDLE_MS : "audio".equals(role) ? 5000 : 60_000);
+            s.setSoTimeout("control".equals(role) ? (int) NET_IDLE_MS : "audio".equals(role) ? 1000 : 60_000);
             if ("control".equals(role)) {
                 Pairing.setLastAddr(ctx, addr);
                 Pairing.setName(ctx, r.h.optString("name"));
@@ -661,6 +677,15 @@ final class Link {
                         Log.i(TAG, "link: the computer unpaired");
                         handler.post(() -> unpair(false));
                         return;
+                    case "a":
+                        audioFrame(f, c.via);
+                        // Android puts this link into sniff mode 7 s after this phone last sent anything on it
+                        // (what it receives doesn't count), and in sniff it can't keep up with audio: the sound
+                        // stopped for seconds. Saying something now and then keeps the link active.
+                        if ("bt".equals(c.via) && SystemClock.elapsedRealtime() - c.sentAt > 2000) {
+                            c.send(Proto.msg("pong"), null);
+                        }
+                        break;
                     default:
                         String via = c.via;
                         handler.post(() -> Features.get(ctx).onMessage(via, f));
@@ -684,12 +709,18 @@ final class Link {
             return;
         }
         if (audio != null || audioConnecting || net == null) return;
+        openAudio();
+    }
+
+    private void openAudio() {
         audioConnecting = true;
         new Thread(() -> {
             Conn a = connectNet("audio", null);
             audioConnecting = false;
             if (a == null) return;
+            Conn old = audio;
             audio = a;
+            if (old != null) old.close(); // a stalled one this replaces (the computer drops it too)
             readAudio(a);
         }, "tandem-audio").start();
     }
@@ -701,18 +732,49 @@ final class Link {
                 try {
                     f = Proto.read(a.in);
                 } catch (SocketTimeoutException e) {
-                    // Nothing playing on the laptop for 5 s: keep the connection, but let the player rest.
+                    long now = SystemClock.elapsedRealtime(), quiet = now - audioAt;
                     AudioSink s = audioSink;
-                    if (s != null) s.onAudio(-1, null, 0, 0);
+                    // Nothing from either link for 5 s: nothing is playing on the laptop. Let the player rest.
+                    if (s != null && quiet > 5000) s.onAudio(-1, null, 0, 0);
+                    // The stream stopped mid-play: maybe the laptop paused, maybe the network stalled (Tailscale
+                    // moving between paths stops traffic for seconds). After a stall, TCP waits out its retry
+                    // backoff, seconds more of silence; a fresh connection plays as soon as the network is back.
+                    // A pause costs a few needless connections.
+                    if (s != null && quiet > 1500 && quiet < 30_000 && !audioConnecting && net != null
+                            && now - audioRetryAt > Math.max(2000, quiet / 3)) {
+                        audioRetryAt = now;
+                        Log.d(TAG, "audio: nothing for " + quiet + " ms, opening a fresh connection");
+                        openAudio();
+                    }
                     continue;
                 }
-                AudioSink s = audioSink;
-                if (s != null && "a".equals(f.type())) s.onAudio(f.h.optInt("c"), f.payload, 0, f.payload.length);
+                if ("a".equals(f.type())) audioFrame(f, a.via);
             }
         } catch (IOException e) {
             Log.d(TAG, "audio: " + e.getMessage());
         }
         drop(a);
+    }
+
+    /** Plays a frame unless the other link already brought it (or a newer one). Frames from a laptop that
+     *  doesn't number its streams (`id`) come over one link only, and all play. */
+    private void audioFrame(Proto.Frame f, String via) {
+        AudioSink s = audioSink;
+        if (s == null) return;
+        synchronized (this) {
+            long now = SystemClock.elapsedRealtime();
+            if (f.h.has("id")) {
+                int id = f.h.optInt("id"), seq = (int) f.h.optLong("s");
+                if (id == audioId && seq - audioSeq <= 0 && now - audioAt < 30_000) return; // seen it
+                if (now - audioAt > 500 && audioAt > 0) {
+                    Log.d(TAG, "audio: " + (now - audioAt) + " ms gap, resumed via " + via);
+                }
+                audioId = id;
+                audioSeq = seq;
+            }
+            audioAt = now;
+            s.onAudio(f.h.optInt("c"), f.payload, 0, f.payload.length); // in order, whichever link it came on
+        }
     }
 
     private static boolean sleep(long ms) {

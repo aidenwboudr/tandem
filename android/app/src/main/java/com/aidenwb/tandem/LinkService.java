@@ -267,7 +267,9 @@ public class LinkService extends Service {
                 } else if (!hpLinked && wake.isHeld()) {
                     wake.release();
                 }
-                link.wantAudio(share && hpOn && link.net != null ? sink : null);
+                // Keep playing what comes over Bluetooth (and an audio connection that still works) while the
+                // control connection reconnects.
+                link.wantAudio(share && hpOn && (link.net != null || link.bt != null) ? sink : null);
 
                 long every = hpLinked ? 1000 : 15_000;
                 if (link.net != null && (now - lastHb >= every || hpOn != lastHp || heartbeatNow)) {
@@ -328,7 +330,8 @@ public class LinkService extends Service {
             JSONObject hb = Proto.msg("hb").put("v", Proto.VERSION).put("hp", hp).put("hp_linked", hp || hpLinked)
                     .put("hpname", headphones == null ? "" : headphones)
                     .put("hpaddr", linked != null ? linked.getAddress() : hpOut != null ? hpOut.getAddress() : "")
-                    .put("codec", Prefs.codec(this));
+                    .put("codec", Prefs.codec(this))
+                    .put("bta", true); // laptop audio may come over Bluetooth too (Link.audioFrame)
             if (Settings.on(this, "media_controls")) {
                 try {
                     media.describe(hb);
