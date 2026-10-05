@@ -12,6 +12,9 @@ is a switch in the app, and they're all optional.
 Tandem is free software (GPL-3.0). There's no account, no cloud and no server: the two devices only
 talk to each other.
 
+<p><img src="docs/images/phone.png" alt="The Tandem app on the phone: the link to the computer over Bluetooth and the network, and the clipboard switches" width="300">
+<img src="docs/images/desktop.png" alt="The Tandem window on the computer: the same link, the hub, actions, and the same switches" width="460"></p>
+
 ## How it connects
 
 1. **Pair over Bluetooth.** Pair your phone with your computer in Bluetooth settings, like any device.
@@ -49,8 +52,8 @@ paired computer's key. The details are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 | **Phone media on the computer** | Control the phone's players from the computer. | on |
 | **Play button opens your music app** | When your music app is closed, the headphones' play button opens it and starts playing. | off |
 
-Change them in the app, or on the computer with `tandem settings` and `tandem set KEY on|off`. Both
-devices share the same settings.
+Change them in the phone app, in the Tandem window on the computer (Tandem in your app launcher, or
+`tandem app`), or with `tandem set KEY on|off`. Both devices share the same settings.
 
 ## Install
 
@@ -64,6 +67,8 @@ distribution. A few features use extra tools; the installer tells you which ones
 - **replying to messages:** `zenity`, `kdialog`, or PyGObject
 - **audio sharing:** PipeWire and `libopus`
 - **screen mirroring:** `scrcpy` and `adb`
+- **the Tandem window:** GTK 4 and libadwaita for Python (Debian/Ubuntu: `python3-gi gir1.2-gtk-4.0
+  gir1.2-adw-1`; Fedora: `python3-gobject libadwaita`; Arch: `python-gobject libadwaita`)
 
 - **Debian, Ubuntu:** download `tandem-phone_<version>_all.deb` from the
   [latest release](https://github.com/aidenwboudr/tandem/releases/latest), install it with
@@ -76,8 +81,8 @@ distribution. A few features use extra tools; the installer tells you which ones
   tandem/laptop/install.sh
   ```
 
-The installer puts `tandem` in `~/.local/bin` and starts the `tandem` user service. It also adds *Send to
-phone* to file managers. Run it again to update. If a firewall is on (firewalld, ufw), it prints the
+The installer puts `tandem` in `~/.local/bin` and starts the `tandem` user service. It also adds Tandem to
+your app launcher and *Send to phone* to file managers. Run it again to update. If a firewall is on (firewalld, ufw), it prints the
 command that lets the phone reach port 47800.
 
 ### On the phone (Android 13+)
@@ -110,6 +115,7 @@ asks again.
 ## The computer's commands
 
 ```
+tandem app               the Tandem window: the link, pairing, every setting
 tandem status            what's connected, battery, clipboard counters
 tandem settings          the feature switches;  tandem set KEY VALUE  changes one
 tandem send FILE...      send files to the phone
@@ -175,8 +181,11 @@ computer would pop them up on every reconnect, and so would a hub switch. `BLUEM
 
 ## Building
 
-- **Computer:** nothing to build. The daemon is plain Python (`laptop/tandemd`). The end-to-end test is
-  `laptop/tests/fake_phone.py`.
+- **Computer:** nothing to build. The daemon and the window are plain Python (`laptop/tandemd`). The
+  end-to-end test is `laptop/tests/fake_phone.py`. `TANDEM_APP_SHOT=out.png tandem app` draws the window
+  to a PNG and quits.
+- **Look:** [docs/BRAND.md](docs/BRAND.md). `./gradlew testReleaseUnitTest --tests '*ScreensTest*'` in
+  `android/` draws the phone app's screens to PNGs without a device.
 - **App:** `android/build.sh` (JDK 17+ and the Android SDK). The first build makes a signing key at
   `~/.config/tandem/android-release.jks`; keep it, because updates must be signed with the same key.
 

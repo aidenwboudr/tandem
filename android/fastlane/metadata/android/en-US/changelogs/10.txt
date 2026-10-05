@@ -1,0 +1,1 @@
+A new look that matches tandem.aidenwb.com: the app icon, a picture of the link to your computer, and which way each feature sends things. Dark mode follows the system. On the computer, a new Tandem window manages pairing and every setting.

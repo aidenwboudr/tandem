@@ -1,6 +1,6 @@
 pkgbase = tandem-phone
 	pkgdesc = Your Android phone and your Linux computer, working as one (clipboard, notifications, calls, files, headphones)
-	pkgver = 3.0.1
+	pkgver = 3.1.0
 	pkgrel = 1
 	url = https://tandem.aidenwb.com
 	install = tandem-phone.install
@@ -11,6 +11,8 @@ pkgbase = tandem-phone
 	depends = bluez
 	depends = openssl
 	depends = iproute2
+	optdepends = libadwaita: the Tandem window (settings, pairing)
+	optdepends = python-gobject: the Tandem window, replying to messages
 	optdepends = wl-clipboard: clipboard on Wayland
 	optdepends = xclip: clipboard on X11 and GNOME
 	optdepends = glib2: notification buttons (gdbus)
@@ -20,7 +22,7 @@ pkgbase = tandem-phone
 	optdepends = scrcpy: tandem screen
 	optdepends = android-tools: tandem screen
 	conflicts = tandem
-	source = tandem-3.0.1.tar.gz::https://github.com/aidenwboudr/tandem/archive/refs/tags/v3.0.1.tar.gz
+	source = tandem-3.1.0.tar.gz::https://github.com/aidenwboudr/tandem/archive/refs/tags/v3.1.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = tandem-phone

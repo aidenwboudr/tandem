@@ -13,8 +13,8 @@ android {
         applicationId 'com.aidenwb.tandem'
         minSdk 33
         targetSdk 35
-        versionCode 9
-        versionName '3.0.1'
+        versionCode 10
+        versionName '3.1.0'
     }
 
     signingConfigs {
@@ -37,4 +37,14 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    // ScreensTest renders the real screens on the JVM (Robolectric, native graphics) into build/screens.
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }

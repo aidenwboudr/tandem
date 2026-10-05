@@ -1,0 +1,15 @@
+<!-- Night: the site's laptop screen (#0f1418, #1b232b), with the two colours lifted for contrast. -->
+<resources>
+    <color name="bg">#FF0F1418</color>
+    <color name="paper">#FF1B232B</color>
+    <color name="ink">#FFEDF0F3</color>
+    <color name="on_ink">#FF131A21</color>
+    <color name="mute">#FF93A1AE</color>
+    <color name="rule">#FF2F3943</color>
+    <color name="phone">#FFE8613B</color>
+    <color name="phone_ink">#FFF5946F</color>
+    <color name="phone_wash">#FF35211B</color>
+    <color name="pc">#FF1C9488</color>
+    <color name="pc_ink">#FF5CC9BD</color>
+    <color name="pc_wash">#FF14302D</color>
+</resources>

@@ -36,7 +36,7 @@
     <application
         android:label="Tandem"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight"
+        android:theme="@style/Theme.Tandem"
         android:allowBackup="false">
 
         <activity

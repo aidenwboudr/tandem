@@ -1,13 +1,15 @@
 # Maintainer: Aiden Boudreau <aiden.boudr@gmail.com>
 pkgname=tandem-phone
-pkgver=3.0.1
+pkgver=3.1.0
 pkgrel=1
 pkgdesc="Your Android phone and your Linux computer, working as one (clipboard, notifications, calls, files, headphones)"
 arch=('any')
 url="https://tandem.aidenwb.com"
 license=('GPL-3.0-only')
 depends=('python' 'systemd' 'bluez' 'openssl' 'iproute2')
-optdepends=('wl-clipboard: clipboard on Wayland'
+optdepends=('libadwaita: the Tandem window (settings, pairing)'
+            'python-gobject: the Tandem window, replying to messages'
+            'wl-clipboard: clipboard on Wayland'
             'xclip: clipboard on X11 and GNOME'
             'glib2: notification buttons (gdbus)'
             'pipewire: sharing headphones'
@@ -29,7 +31,9 @@ package() {
   sed 's|%h/.local/bin/tandem|/usr/bin/tandem|g' laptop/tandem.service > "$pkgdir/usr/lib/systemd/user/tandem.service"
   install -Dm644 laptop/wireplumber/51-bluez-no-handsfree-unit.conf \
     "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/51-bluez-no-handsfree-unit.conf"
+  install -Dm644 laptop/desktop/tandem.desktop "$pkgdir/usr/share/applications/tandem.desktop"
   install -Dm644 laptop/desktop/tandem-send.desktop "$pkgdir/usr/share/applications/tandem-send.desktop"
+  install -Dm644 laptop/tandemd/ui/tandem.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/tandem.svg"
   install -Dm644 laptop/desktop/tandem-servicemenu.desktop "$pkgdir/usr/share/kio/servicemenus/tandem.desktop"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }
