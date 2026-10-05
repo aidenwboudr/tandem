@@ -9,6 +9,7 @@ import hmac
 import json
 import queue
 import secrets
+import select
 import socket
 import ssl
 import subprocess
@@ -35,15 +36,15 @@ NO_PAYLOAD = {}
 
 
 def recv_exact(sock, n, alive=None):
-    """Reads n bytes. With `alive`, a read timeout only ends it once alive() says the connection is done."""
+    """Reads n bytes. With `alive` (a plain socket, not TLS), it wakes every BT_WAKE seconds while waiting and
+    gives up once alive() says the connection is done."""
     buf = bytearray()
     while len(buf) < n:
-        try:
-            chunk = sock.recv(min(n - len(buf), 1 << 16))
-        except (socket.timeout, TimeoutError):
-            if alive is None or not alive():
-                raise
-            continue
+        if alive is not None:
+            while not select.select([sock], [], [], BT_WAKE)[0]:
+                if not alive():
+                    raise ConnectionError("closed")
+        chunk = sock.recv(min(n - len(buf), 1 << 16))
         if not chunk:
             raise ConnectionError("closed")
         buf += chunk
@@ -89,12 +90,8 @@ class Conn:
         self.closed = False
 
     def send(self, header, payload=b""):
-        data = encode(header, payload)
-        # One write for small frames: on Bluetooth every write is a packet, and audio sends 50 frames a second.
-        if payload and len(payload) <= 64 * 1024:
-            data, payload = data + payload, b""
         with self.lock:
-            self.sock.sendall(data)
+            self.sock.sendall(encode(header, payload))
             if payload:
                 self.sock.sendall(payload)
 
@@ -428,8 +425,7 @@ class Link:
         try:
             conn.send(self.settings.as_message())
             conn.send({"t": "addrs", "addrs": self.addrs, "port": self.port})
-            # Bluetooth sends time out too then: one stuck that long means the link is gone.
-            conn.sock.settimeout(NET_IDLE if via == "net" else BT_WAKE)
+            conn.sock.settimeout(NET_IDLE if via == "net" else None)
             alive = None if via == "net" else lambda: not conn.closed and not self.stop
             while not self.stop:
                 h, p = recv_frame(conn.sock, alive=alive)
