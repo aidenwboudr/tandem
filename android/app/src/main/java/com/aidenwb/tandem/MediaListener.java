@@ -89,6 +89,9 @@ public class MediaListener extends NotificationListenerService {
     private boolean worthMirroring(StatusBarNotification sbn) {
         Notification n = sbn.getNotification();
         if (sbn.isOngoing() || (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return false;
+        // Android 14+ drops FLAG_ONGOING_EVENT from foreground-service notifications (users can swipe them),
+        // so "app is running" status notifications only show up as FGS / not clearable.
+        if ((n.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0 || !sbn.isClearable()) return false;
         if (Notification.CATEGORY_CALL.equals(n.category) || Notification.CATEGORY_TRANSPORT.equals(n.category)
                 || Notification.CATEGORY_PROGRESS.equals(n.category) || Notification.CATEGORY_SERVICE.equals(n.category)) {
             return false;
