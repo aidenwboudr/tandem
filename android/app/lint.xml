@@ -13,4 +13,6 @@
     <!-- Screenshots work with full or partial photo access alike. -->
     <issue id="SelectedPhotoAccess" severity="ignore" />
     <issue id="DataExtractionRules" severity="ignore" />
+    <!-- Look.Badge and friends are only ever built in code, never inflated from XML. -->
+    <issue id="ViewConstructor" severity="ignore" />
 </lint>
