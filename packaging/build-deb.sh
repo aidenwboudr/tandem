@@ -15,7 +15,9 @@ mkdir -p "$root/usr/lib/systemd/user"
 sed 's|%h/.local/bin/tandem|/usr/bin/tandem|g' laptop/tandem.service > "$root/usr/lib/systemd/user/tandem.service"
 install -Dm644 laptop/wireplumber/51-bluez-no-handsfree-unit.conf \
   "$root/usr/share/wireplumber/wireplumber.conf.d/51-bluez-no-handsfree-unit.conf"
+install -Dm644 laptop/desktop/tandem.desktop "$root/usr/share/applications/tandem.desktop"
 install -Dm644 laptop/desktop/tandem-send.desktop "$root/usr/share/applications/tandem-send.desktop"
+install -Dm644 laptop/tandemd/ui/tandem.svg "$root/usr/share/icons/hicolor/scalable/apps/tandem.svg"
 install -Dm644 laptop/desktop/tandem-servicemenu.desktop "$root/usr/share/kio/servicemenus/tandem.desktop"
 install -Dm644 LICENSE "$root/usr/share/doc/tandem-phone/copyright"
 install -Dm644 README.md "$root/usr/share/doc/tandem-phone/README.md"
@@ -26,7 +28,7 @@ Version: $version
 Architecture: all
 Maintainer: Aiden Boudreau <aiden.boudr@gmail.com>
 Depends: python3, systemd, bluez, openssl, iproute2
-Recommends: wl-clipboard | xclip, libglib2.0-bin, pipewire-bin, libopus0, zenity
+Recommends: python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, wl-clipboard | xclip, libglib2.0-bin, pipewire-bin, libopus0, zenity
 Suggests: scrcpy, adb
 Section: utils
 Priority: optional
@@ -35,7 +37,8 @@ Description: your Android phone and your Linux computer, working as one
  Shared clipboard, phone notifications and calls on the computer, files and links
  both ways, find my phone, Do Not Disturb sync, typing on the phone, lock on leave,
  and one pair of Bluetooth headphones for both devices. Pairs over Bluetooth.
- This is the computer side; install the Tandem app on the phone.
+ This is the computer side (a service, the tandem command and the Tandem window);
+ install the Tandem app on the phone.
 CTRL
 cat > "$root/DEBIAN/postinst" <<'POST'
 #!/bin/sh

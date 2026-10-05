@@ -11,6 +11,7 @@ import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
 
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
@@ -18,6 +19,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.shadows.ShadowBuild;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -46,7 +48,7 @@ public class ScreensTest {
     @Test
     public void pairingPrompt() throws IOException {
         grantBasics();
-        Link.get(app).pending = new Link.PendingPair("aiden-laptop13", "00:00:00:00:00:00");
+        Link.get(app).pending = new Link.PendingPair("my-laptop", "00:00:00:00:00:00");
         shoot("pairing");
         Link.get(app).pending = null;
     }
@@ -72,6 +74,11 @@ public class ScreensTest {
         shoot("bluetooth-only");
     }
 
+    @Before
+    public void phoneName() {
+        ShadowBuild.setModel("Pixel 8a"); // what the screens call "this phone"
+    }
+
     private void grantBasics() {
         shadowOf(app).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS);
         shadowOf(app.getSystemService(PowerManager.class)).setIgnoringBatteryOptimizations(app.getPackageName(), true);
@@ -79,11 +86,11 @@ public class ScreensTest {
 
     private void connect() {
         grantBasics();
-        Pairing.save(app, "c0ffee", "aiden-laptop13", "00", "t", "00:00:00:00:00:00");
+        Pairing.save(app, "c0ffee", "my-laptop", "00", "t", "00:00:00:00:00:00");
         Link link = Link.get(app);
         // Fake connections: whatever the screen sends goes nowhere.
-        link.bt = new Link.Conn("bt", "E8:D5:2B:4B:2A:07", null, null, new ByteArrayOutputStream());
-        link.net = new Link.Conn("net", "100.93.211.68", null, null, new ByteArrayOutputStream());
+        link.bt = new Link.Conn("bt", "00:00:00:00:00:01", null, null, new ByteArrayOutputStream());
+        link.net = new Link.Conn("net", "192.168.1.42", null, null, new ByteArrayOutputStream());
         Status.computerBattery = 82;
         Status.computerCharging = true;
         LinkService.headphones = "MOMENTUM 4";

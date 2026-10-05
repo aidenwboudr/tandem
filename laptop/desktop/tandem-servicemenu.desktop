@@ -6,5 +6,5 @@ X-KDE-ServiceTypes=KonqPopupMenu/Plugin
 
 [Desktop Action send]
 Name=Send to phone (Tandem)
-Icon=phone
+Icon=tandem
 Exec=tandem send %F

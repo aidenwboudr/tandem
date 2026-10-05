@@ -1,6 +1,7 @@
 """tandem: your phone and your Linux computer, working as one.
 
 Usage: tandem [command]
+  app                    the Tandem window: the link, pairing and every setting
   run                    the daemon (the tandem.service user unit runs this)
   status                 what's linked, battery, clipboard counters (JSON with --json)
   pair                   look for your phone now (pair it over Bluetooth first, and open the app)
@@ -178,6 +179,15 @@ def main():
     if cmd == "run":
         from .daemon import Daemon
         Daemon(load_config()).run()
+    elif cmd == "app":
+        try:
+            from .app import main as app_main
+        except (ImportError, ValueError) as e:
+            sys.exit(f"tandem app needs GTK 4 and libadwaita for Python ({e}).\n"
+                     "Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1\n"
+                     "Fedora: sudo dnf install python3-gobject gtk4 libadwaita\n"
+                     "Arch: sudo pacman -S python-gobject gtk4 libadwaita")
+        app_main()
     elif cmd == "status":
         sys.exit(status("--json" in rest))
     elif cmd == "pair":

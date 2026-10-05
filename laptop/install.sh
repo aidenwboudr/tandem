@@ -40,6 +40,8 @@ command -v pw-record >/dev/null && command -v wpctl >/dev/null \
 command -v zenity >/dev/null || command -v kdialog >/dev/null || /usr/bin/python3 -c 'import gi' 2>/dev/null \
   || note "replying to messages: install zenity, kdialog, or python3-gi"
 command -v scrcpy >/dev/null || note "screen mirroring (tandem screen): install scrcpy and adb"
+/usr/bin/python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")' 2>/dev/null \
+  || note "the Tandem window (settings, pairing): install GTK 4 + libadwaita for Python (Debian/Ubuntu: python3-gi gir1.2-gtk-4.0 gir1.2-adw-1)"
 
 # ---------------------------------------------------------------- the daemon
 say "Installing"
@@ -77,9 +79,15 @@ if command -v wpctl >/dev/null; then
   fi
 fi
 
-# "Send to phone" in file managers (Open With, Nautilus scripts, Dolphin's menu).
+# The Tandem window in the app launcher, and "Send to phone" in file managers (Open With, Nautilus
+# scripts, Dolphin's menu). Launchers don't always have ~/.local/bin on their PATH: use the full path.
 apps="$HOME/.local/share/applications"
-install -Dm644 "$here/desktop/tandem-send.desktop" "$apps/tandem-send.desktop"
+bin="$HOME/.local/bin/tandem"
+install -Dm644 "$here/tandemd/ui/tandem.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/tandem.svg"
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -qt "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+sed "s|^Exec=tandem |Exec=$bin |" "$here/desktop/tandem.desktop" > "$apps/tandem.desktop"
+sed "s|^Exec=tandem |Exec=$bin |" "$here/desktop/tandem-send.desktop" > "$apps/tandem-send.desktop"
+note "Tandem in your app launcher (or run: tandem app)"
 install -Dm755 "$here/desktop/send-to-phone.sh" "$HOME/.local/share/nautilus/scripts/Send to phone"
 install -Dm644 "$here/desktop/tandem-servicemenu.desktop" "$HOME/.local/share/kio/servicemenus/tandem.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$apps" 2>/dev/null || true
@@ -133,9 +141,9 @@ fi
 
 say "Next"
 if [ -f "$HOME/.config/tandem/phone.json" ]; then
-  note "Already paired. \`tandem status\` shows the link."
+  note "Already paired. Open Tandem from your app launcher (or \`tandem status\`) to see the link."
 else
   note "1. Install the Tandem app on your phone (see the README)."
   note "2. Pair the phone with this computer in Bluetooth settings, like any device."
-  note "3. Open Tandem on the phone and say yes when it asks. \`tandem status\` shows the link."
+  note "3. Open Tandem on the phone and say yes when it asks. The Tandem window here shows the link."
 fi

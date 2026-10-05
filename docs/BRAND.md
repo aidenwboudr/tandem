@@ -73,7 +73,11 @@ cut from the site's variable fonts.
 7. Copy: plain sentences, sentence case, no em dashes, say what happens ("Copy on the phone, paste on
    the computer").
 
-## Seeing the phone screens without a phone
+## Seeing the screens
 
-`cd android && ./gradlew testReleaseUnitTest --tests '*ScreensTest*'` builds the real main screen in
-several states with Robolectric and writes PNGs to `android/app/build/screens/`.
+- Phone, without a phone: `cd android && ./gradlew testReleaseUnitTest --tests '*ScreensTest*'` builds the
+  real main screen in several states with Robolectric and writes PNGs to `android/app/build/screens/`.
+- Computer: `TANDEM_APP_SHOT=out.png tandem app` draws the window and quits (`TANDEM_APP_SHOT_PAGE=1` for
+  the whole scrolling page, `ADW_DEBUG_COLOR_SCHEME=prefer-light|prefer-dark` to pick a theme, and
+  `XDG_RUNTIME_DIR=<dir with a tandem.json>` to show a made-up state).
+- Public screenshots (README, stores) use made-up names and addresses, never a real device's.

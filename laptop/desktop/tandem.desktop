@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Tandem
+GenericName=Phone link
+Comment=Your Android phone and this computer: the link, pairing and settings
+Icon=tandem
+Exec=tandem app
+Terminal=false
+Categories=Utility;Network;GTK;
+Keywords=phone;android;clipboard;bluetooth;pair;notifications;
+StartupNotify=true
+StartupWMClass=com.aidenwb.Tandem
