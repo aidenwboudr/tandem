@@ -192,6 +192,11 @@ def audio_paths():
     check("…while the stalled one keeps only the newest frames", len(stuck.q) <= PATH_QUEUE
           and stuck.q[-1][0]["s"] == 49)
     stall.set()
+    import array
+    from tandemd.headphones import audible
+    check("silence stays off Bluetooth", not audible(bytes(3840)) and not audible(array.array("h", [3] * 1920).tobytes()))
+    check("…sound in either channel goes on it", audible(array.array("h", [0, 400] * 960).tobytes())
+          and audible(array.array("h", [400, 0] * 960).tobytes()))
 
 
 if __name__ == "__main__":

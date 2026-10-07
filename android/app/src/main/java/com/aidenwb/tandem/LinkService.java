@@ -12,6 +12,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.net.wifi.WifiManager;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -53,6 +54,9 @@ public class LinkService extends Service {
     private String lastMediaLogged;
     private volatile boolean heartbeatNow; // a mixer command landed: report the new state right away
     private volatile boolean wakeNow; // the Bluetooth broadcast: look for the headphones now
+    // A call (phone or app) is on: laptop audio stays off Bluetooth (hb `bta`), so the headphones' call audio
+    // has the radio to itself. Sharing it with the laptop's stream made calls choppy.
+    private volatile boolean inCall;
     private PlayLauncher launcher;
     private volatile BluetoothA2dp a2dp;
     private volatile String switchTo; // a hub switch to send with the next heartbeat
@@ -242,9 +246,19 @@ public class LinkService extends Service {
         long lastHb = 0, lastHpCheck = 0, lastLinkCheck = 0;
         BluetoothDevice linked = null;
         boolean lastHp = false;
+        AudioManager am = getSystemService(AudioManager.class);
         try {
             while (!stop) {
                 long now = SystemClock.elapsedRealtime();
+                int mode = am.getMode();
+                boolean call = mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION
+                        || mode == AudioManager.MODE_RINGTONE || mode == AudioManager.MODE_CALL_SCREENING
+                        || mode == AudioManager.MODE_CALL_REDIRECT || mode == AudioManager.MODE_COMMUNICATION_REDIRECT;
+                if (call != inCall) {
+                    inCall = call;
+                    heartbeatNow = true;
+                    Log.i(TAG, call ? "call: laptop audio off Bluetooth" : "call over: laptop audio back on Bluetooth");
+                }
                 // A binder call. Without the headphones, check less often (the Bluetooth broadcast also
                 // pokes the service when they connect).
                 if (now - lastHpCheck >= (hpLinked ? 200 : 1000) || wakeNow) {
@@ -331,7 +345,7 @@ public class LinkService extends Service {
                     .put("hpname", headphones == null ? "" : headphones)
                     .put("hpaddr", linked != null ? linked.getAddress() : hpOut != null ? hpOut.getAddress() : "")
                     .put("codec", Prefs.codec(this))
-                    .put("bta", true); // laptop audio may come over Bluetooth too (Link.audioFrame)
+                    .put("bta", !inCall); // laptop audio may come over Bluetooth too (Link.audioFrame)
             if (Settings.on(this, "media_controls")) {
                 try {
                     media.describe(hb);
