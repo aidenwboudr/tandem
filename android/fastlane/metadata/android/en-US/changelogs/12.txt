@@ -1,0 +1,1 @@
+Calls on your headphones no longer turn choppy: while a call is on, laptop audio stays off Bluetooth, and it only uses Bluetooth while there's something to hear.

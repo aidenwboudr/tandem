@@ -46,9 +46,10 @@ payload            header.len bytes (0 for most messages)
   - `control`: all the messages below. The phone sends `ping` every 25 s, and the computer drops a
     connection that has been quiet for 90 s.
   - `audio`: the computer sends `a {c: codec, s: seq, id: stream}` frames with Opus (`c=1`) or PCM (`c=0`)
-    payloads, 20 ms each. When the phone's `hb` says `bta`, the computer also sends the Opus frames over the
-    Bluetooth link, and the phone plays each `(id, s)` once, from whichever link brings it first. A network
-    stall (Tailscale moving between a relay and a direct path) then doesn't cut the sound. While audio comes
+    payloads, 20 ms each. When the phone's `hb` says `bta`, the computer also sends the Opus frames you can hear
+    (and 1 s after) over the Bluetooth link. The phone clears `bta` during a call, so the headphones' call audio
+    has the phone's radio to itself. The phone plays each `(id, s)` once, from whichever link brings it first:
+    a network stall (Tailscale moving between a relay and a direct path) then doesn't cut the sound. While audio comes
     over Bluetooth the phone sends a `pong` there every 2 s: Android puts a link it hasn't sent on for 7 s into
     sniff mode, which can't carry audio. When nothing has come from either link for 1.5 s, the phone opens a
     fresh audio connection (the computer drops the old one) instead of waiting out TCP's retry backoff.

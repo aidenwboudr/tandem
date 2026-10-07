@@ -14,6 +14,7 @@ then goes both ways at once, over the network and the Bluetooth link, and the ph
 each frame comes first: a stall on one (Tailscale moving between a relay and a direct path stops traffic
 for a few seconds) doesn't cut the sound.
 """
+import array
 import collections
 import ctypes
 import ctypes.util
@@ -55,9 +56,19 @@ CODEC_PCM, CODEC_OPUS = 0, 1
 # Audio frames (20 ms each) waiting for one path. A stalled path drops the oldest instead of holding up the
 # other; the phone would skip audio this late anyway.
 PATH_QUEUE = 10
+# Bluetooth only carries frames you can hear, and this many more after the last one (a quiet passage shouldn't
+# flicker it on and off). An app that holds a stream open streams silence all day, and every frame over
+# Bluetooth takes radio time from the phone's own Bluetooth, the headphones' call audio above all.
+BT_HANGOVER = 50  # frames: 1 s
 
 
 # ---------------------------------------------------------------- pipewire helpers
+
+def audible(pcm):
+    """Louder than about -50 dBFS? (s16 LE stereo; every 7th sample is plenty, and odd so both channels count.)"""
+    a = array.array("h", pcm)
+    return max(map(abs, a[::7]), default=0) > 100
+
 
 def pw_nodes():
     try:
@@ -178,7 +189,7 @@ class Streamer:
         self.link, self.bitrate, self.description = link, bitrate, description
         self.proc = None
         self.codec = None
-        self.bt = False  # the phone said (hb `bta`) it plays audio frames that come over Bluetooth
+        self.bt = False  # the phone said (hb `bta`) it takes audio frames over Bluetooth now (not during a call)
         self.net_path = AudioPath("net", self._send_net)
         self.bt_path = AudioPath("bt", lambda h, p: self.link.send(h, p, via="bt"))
 
@@ -228,14 +239,16 @@ class Streamer:
         # The phone keeps the newest frame of a stream: `seq` orders them, `id` tells a new stream (seq from 0).
         sid = secrets.randbelow(1 << 31)
         seq = 0
+        loud_left = 0  # frames Bluetooth carries on for after the last audible one (BT_HANGOVER)
         f = proc.stdout
         try:
             while True:
                 buf = f.read(frame)
                 if not buf or len(buf) < frame:
                     break
+                loud_left = BT_HANGOVER if audible(buf) else max(0, loud_left - 1)
                 # Bluetooth carries Opus only: raw PCM (1.5 Mbit/s) is more than it can take.
-                net, bt = self.link.audio, self.bt and enc and self.link.bt
+                net, bt = self.link.audio, self.bt and enc and loud_left and self.link.bt
                 if net or bt:
                     header = {"t": "a", "c": kind, "s": seq, "id": sid}
                     payload = enc.encode(buf) if enc else buf
