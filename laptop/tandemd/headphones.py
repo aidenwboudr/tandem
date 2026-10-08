@@ -292,6 +292,7 @@ class Headphones:
         self.hub = self.prefer  # who carries the audio now: `prefer`, unless the network is gone (NET_FALLBACK)
         self.net_was, self.net_since = None, 0.0
         self.fallback = False
+        self.net_seen = False
         self.claim_since = None  # prefer=laptop: since when the laptop has been trying to get the headphones
         self.last_unlink_try = 0.0
         self.unlink_logged = False
@@ -406,11 +407,15 @@ class Headphones:
         net = bool(self.d.link.net)
         if net != self.net_was:
             self.net_was, self.net_since = net, now
+        self.net_seen = self.net_seen or net
         settled = now - self.net_since > NET_FALLBACK
         hub = self.prefer
-        if self.prefer == "phone" and (not net if settled else self.hub == "laptop"):
+        # Not since this daemon started: no hand-over to the phone to take back in 10 s. Down for a moment
+        # after that: a blip, carry on. Back after an outage: give it a moment first.
+        if self.prefer == "phone" and (not net and (settled or self.fallback or not self.net_seen)
+                                       or net and self.fallback and not settled):
             hub = "laptop"
-        fallback = hub != self.prefer
+        fallback = hub != self.prefer and (self.fallback or settled)
         if fallback != self.fallback:
             self.fallback = fallback
             if fallback:
