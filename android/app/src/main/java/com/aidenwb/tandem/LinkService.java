@@ -286,7 +286,9 @@ public class LinkService extends Service {
                 link.wantAudio(share && hpOn && (link.net != null || link.bt != null) ? sink : null);
 
                 long every = hpLinked ? 1000 : 15_000;
-                if (link.net != null && (now - lastHb >= every || hpOn != lastHp || heartbeatNow)) {
+                // Over Bluetooth too when the network is down: without heartbeats the computer can't tell the
+                // headphones are on, so it neither hands them over nor takes them back.
+                if (link.connected() && (now - lastHb >= every || hpOn != lastHp || heartbeatNow)) {
                     lastHb = now;
                     heartbeatNow = false;
                     lastHp = hpOn;
@@ -362,7 +364,7 @@ public class LinkService extends Service {
                     Log.i(TAG, "media " + m);
                 }
             }
-            link.sendNet(hb, null);
+            link.send(hb, null);
         } catch (JSONException | SecurityException e) {
             error = "send: " + e.getMessage();
         }
