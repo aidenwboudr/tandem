@@ -115,11 +115,11 @@ final class Features implements Link.Listener, Settings.Listener {
                 case "open":
                     files.onOpen(h);
                     break;
-                case "file-offer":
-                    files.onOffer(h);
-                    break;
                 case "file":
-                    files.onInline(h, f.payload);
+                    if (f.file != null) files.onFile(h, f.file);
+                    break;
+                case "file-no":
+                    files.onRefused(h);
                     break;
                 case "key":
                     if (Settings.on(ctx, "remote_input")) Keyboard.onKey(h);

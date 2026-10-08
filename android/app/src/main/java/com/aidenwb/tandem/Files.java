@@ -27,14 +27,13 @@ import java.util.regex.Pattern;
 
 /**
  * Files both ways, and links. Outgoing files are copied into an outbox first (a share's permission ends
- * with the share), then sent over their own network connection, or inline over Bluetooth if they're
- * small and there's no network. Incoming ones land in Downloads/Tandem.
+ * with the share), then sent as a transfer over whichever link is up ({@link Xfer}). Incoming ones land in
+ * Downloads/Tandem.
  */
 final class Files {
     private static final String TAG = "Tandem";
     private static final Pattern LINK = Pattern.compile("^(https?|mailto|tel|geo):\\S+$", Pattern.CASE_INSENSITIVE);
     private static final long OUTBOX_TTL_MS = 24 * 3600_000L;
-    private static final String REFUSED = "refused: ";
     private final Context ctx;
     private final Object sending = new Object();
 
@@ -148,96 +147,64 @@ final class Files {
                 } catch (IOException ignored) {
                 }
                 File f = parts[0];
-                String err = send(f, mime, kind);
+                String err = send(f, dir.getName(), mime, kind); // the same id each try: it carries on
                 if (err == null) {
                     deleteDir(dir);
                     Log.i(TAG, "files: sent " + f.getName());
                     if (!"screenshot".equals(kind)) Notifications.event(ctx, "Sent to " + Pairing.name(ctx), f.getName(), null);
-                } else if (err.startsWith(REFUSED)) {
+                } else if (err.startsWith(Xfer.REFUSED)) {
                     deleteDir(dir);
                     Log.i(TAG, "files: " + f.getName() + ": " + err);
-                    Notifications.event(ctx, "Not sent to " + Pairing.name(ctx), f.getName() + ": " + err.substring(REFUSED.length()), null);
+                    Notifications.event(ctx, "Not sent to " + Pairing.name(ctx), f.getName() + ": " + err.substring(Xfer.REFUSED.length()), null);
                 } else {
                     Log.i(TAG, "files: " + f.getName() + " waits: " + err);
-                    // the next ones may still fit (e.g. small files over Bluetooth)
+                    break; // not connected: the rest wait too, for the next connection
                 }
             }
         }
     }
 
     /** Null on success, else why it didn't go. */
-    private String send(File f, String mime, String kind) {
-        Link link = Link.get(ctx);
-        JSONObject h;
+    private String send(File f, String id, String mime, String kind) {
         try {
-            h = Proto.msg("file").put("id", UUID.randomUUID().toString()).put("name", f.getName())
-                    .put("mime", mime).put("kind", kind);
-        } catch (JSONException e) {
+            JSONObject h = Proto.msg("file").put("id", id).put("name", f.getName()).put("mime", mime).put("kind", kind);
+            return Link.get(ctx).transfer(h, Xfer.of(f), null);
+        } catch (IOException | JSONException e) {
             return e.getMessage();
         }
-        if (link.net != null) {
-            Link.Conn c = link.connectNet("bulk", null);
-            if (c != null) {
-                try (InputStream in = new FileInputStream(f)) {
-                    synchronized (c) {
-                        c.out.write(Proto.header(h, f.length()));
-                        Proto.copy(in, c.out, f.length());
-                        c.out.flush();
-                    }
-                    Proto.Frame ok = Proto.read(c.in);
-                    if ("file-ok".equals(ok.type())) return null;
-                    if ("file-no".equals(ok.type())) return REFUSED + ok.h.optString("error", "refused");
-                    return "the computer didn't take it";
-                } catch (IOException | JSONException e) {
-                    return e.getMessage();
-                } finally {
-                    c.close();
-                }
-            }
-        }
-        if (link.bt != null && f.length() <= Proto.BT_MAX) {
-            try {
-                byte[] data = java.nio.file.Files.readAllBytes(f.toPath());
-                return link.send(h, data) ? null : "not connected";
-            } catch (IOException e) {
-                return e.getMessage();
-            }
-        }
-        return link.connected() ? "too big for Bluetooth; waiting for the network" : "not connected";
+    }
+
+    /** The computer didn't take a file (turned off there). */
+    void onRefused(JSONObject h) {
+        Notifications.event(ctx, "Not taken by " + Pairing.name(ctx),
+                h.optString("name", "A file") + ": " + h.optString("error", "refused"), null);
     }
 
     // ------------------------------------------------------------ computer -> phone
 
-    void onOffer(JSONObject h) {
-        if (!Settings.on(ctx, "files")) return;
-        String id = h.optString("id");
-        new Thread(() -> {
-            Link.Conn c = Link.get(ctx).connectNet("bulk", id);
-            if (c == null) {
-                Log.w(TAG, "files: can't reach the computer to take " + h.optString("name"));
-                return;
-            }
+    /** A file from the computer, where its transfer left it. */
+    void onFile(JSONObject h, File file) {
+        String name = h.optString("name");
+        if (!Settings.on(ctx, "files")) {
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
             try {
-                JSONObject fh = Proto.readHeader(c.in);
-                Uri uri = save(fh.optString("name"), fh.optString("mime"), c.in, fh.optLong("len"));
-                c.send(Proto.msg("file-ok").put("id", id), null);
-                received(fh.optString("name"), fh.optString("mime"), uri);
-            } catch (IOException | JSONException e) {
-                Log.w(TAG, "files: receiving failed", e);
+                Link.get(ctx).send(Proto.msg("file-no").put("id", h.optString("id")).put("name", name)
+                        .put("error", "turned off on the phone"), null);
+            } catch (JSONException ignored) {
+            }
+            return;
+        }
+        new Thread(() -> {
+            try (InputStream in = new FileInputStream(file)) {
+                received(name, h.optString("mime"), save(name, h.optString("mime"), in, file.length()));
+            } catch (IOException e) {
+                Log.w(TAG, "files: saving failed", e);
             } finally {
-                c.close();
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
             }
         }, "tandem-files-in").start();
-    }
-
-    void onInline(JSONObject h, byte[] data) {
-        if (!Settings.on(ctx, "files")) return;
-        try {
-            Uri uri = save(h.optString("name"), h.optString("mime"), new java.io.ByteArrayInputStream(data), data.length);
-            received(h.optString("name"), h.optString("mime"), uri);
-        } catch (IOException e) {
-            Log.w(TAG, "files: saving failed", e);
-        }
     }
 
     private Uri save(String name, String mime, InputStream in, long len) throws IOException {

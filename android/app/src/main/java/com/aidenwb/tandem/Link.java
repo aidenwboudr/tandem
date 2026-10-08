@@ -50,10 +50,11 @@ import javax.net.ssl.X509TrustManager;
 
 /**
  * The link with the computer (docs/PROTOCOL.md). Bluetooth: this phone serves an RFCOMM socket and the
- * computer connects to it; that's where pairing happens, and small messages go that way when there's no
- * network. Network: this phone connects to the computer's TLS server (its certificate pinned at pairing)
- * for a control connection, an audio connection while laptop audio plays here, and one per file.
- * Laptop audio also comes over Bluetooth: each frame plays from whichever link brings it first.
+ * computer connects to it; that's where pairing happens. Network: this phone connects to the computer's TLS
+ * server (its certificate pinned at pairing) for a control connection, and an audio connection while laptop
+ * audio plays here. Every message can go either way, the network when it's up, else Bluetooth; big payloads
+ * go in chunks that carry on across a change of link ({@link Xfer}). Laptop audio comes both ways at once:
+ * each frame plays from whichever link brings it first.
  *
  * Incoming messages are handed to {@link Features} on one thread ("tandem-link"), in order.
  */
@@ -142,12 +143,14 @@ final class Link {
     private int audioId, audioSeq;
     private volatile long audioAt;
     private volatile long audioRetryAt; // when a fresh audio connection was last started over a stalled one
+    final Xfer xfer;
 
     private Link(Context ctx) {
         this.ctx = ctx;
         HandlerThread t = new HandlerThread("tandem-link");
         t.start();
         handler = new Handler(t.getLooper());
+        xfer = new Xfer(this, new java.io.File(ctx.getCacheDir(), "xfer"));
     }
 
     Handler handler() {
@@ -223,15 +226,22 @@ final class Link {
         }
     }
 
-    /** Sends over the network if it's up, else over Bluetooth (small payloads only). False if neither could.
-     *  From the main thread (where Android forbids network I/O) it's queued, and the answer is a guess. */
+    /** Sends over the network if it's up, else over Bluetooth. False if neither could. A payload over
+     *  {@link Xfer#INLINE_MAX} goes as a transfer, which waits until the computer has it all. From the main
+     *  thread (where Android forbids network I/O) or this link's own, it's queued, and the answer is a guess. */
     boolean send(JSONObject h, byte[] payload) {
+        int len = payload == null ? 0 : payload.length;
+        boolean mine = Looper.myLooper() == Looper.getMainLooper() || Looper.myLooper() == handler.getLooper();
+        if (len > Xfer.INLINE_MAX) {
+            if (!mine) return xfer.send(h, Xfer.of(payload), null) == null;
+            new Thread(() -> xfer.send(h, Xfer.of(payload), null), "tandem-xfer-out").start();
+            return connected();
+        }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             handler.post(() -> send(h, payload));
-            return payload == null || payload.length <= Proto.BT_MAX ? connected() : net != null;
+            return connected();
         }
-        int len = payload == null ? 0 : payload.length;
-        for (Conn c : new Conn[]{net, len <= Proto.BT_MAX ? bt : null}) {
+        for (Conn c : new Conn[]{net, bt}) {
             if (c == null) continue;
             try {
                 c.send(h, payload);
@@ -244,23 +254,19 @@ final class Link {
         return false;
     }
 
-    boolean sendNet(JSONObject h, byte[] payload) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            handler.post(() -> sendNet(h, payload));
-            return net != null;
-        }
-        Conn c = net;
-        if (c == null) return false;
-        try {
-            c.send(h, payload);
-            return true;
-        } catch (IOException e) {
-            drop(c);
-            return false;
-        }
+    /** A message with a big payload (a file, a clipboard image), over whichever link is up. Waits until the
+     *  computer has all of it, so not on the main thread; gives up early once `wanted` says no. Null once
+     *  it's there, else why not (see {@link Xfer#send}). */
+    String transfer(JSONObject h, Xfer.Source src, java.util.function.BooleanSupplier wanted) {
+        return xfer.send(h, src, wanted);
     }
 
-    private void drop(Conn c) {
+    /** A message a transfer brought in, handed on like any other. */
+    void deliver(String via, JSONObject h, byte[] payload, java.io.File file) {
+        handler.post(() -> Features.get(ctx).onMessage(via, new Proto.Frame(h, payload, file)));
+    }
+
+    void drop(Conn c) {
         c.close();
         boolean was = false;
         synchronized (this) {
@@ -403,6 +409,9 @@ final class Link {
                 Pairing.setName(ctx, name);
             }
             Pairing.setAddrs(ctx, h.optJSONArray("addrs"), h.optInt("port", Proto.DEFAULT_PORT));
+            if (h.optInt("v") < Proto.VERSION) {
+                error = "Update Tandem on " + name + ": files and big clipboard copies need the same version on both.";
+            }
             serve(c);
         } catch (IOException | JSONException e) {
             Log.i(TAG, "link: bluetooth: " + e.getMessage());
@@ -447,7 +456,7 @@ final class Link {
             boolean worked = false;
             if (Pairing.paired(ctx) && net == null) {
                 lastNetTryAt = SystemClock.elapsedRealtime();
-                Conn c = connectNet("control", null);
+                Conn c = connectNet("control");
                 if (c != null) {
                     worked = true;
                     error = null;
@@ -479,17 +488,17 @@ final class Link {
     }
 
     /** Opens an authenticated TLS connection to the computer, trying each address it has. */
-    Conn connectNet(String role, String bulk) {
+    private Conn connectNet(String role) {
         if (!Pairing.paired(ctx)) return null;
         List<String> cands = candidates();
         for (String a : cands) {
-            Conn c = tryConnect(a, role, bulk);
+            Conn c = tryConnect(a, role);
             if (c != null) return c;
         }
         if ("control".equals(role)) {
             String found = discover();
             if (found != null && !cands.contains(found)) {
-                Conn c = tryConnect(found, role, bulk);
+                Conn c = tryConnect(found, role);
                 if (c != null) return c;
             }
             if (!cands.isEmpty()) error = "Computer not reachable on the network";
@@ -536,7 +545,7 @@ final class Link {
         return false;
     }
 
-    private Conn tryConnect(String addr, String role, String bulk) {
+    private Conn tryConnect(String addr, String role) {
         SSLSocket s = null;
         try {
             SSLContext tls = SSLContext.getInstance("TLS");
@@ -547,17 +556,15 @@ final class Link {
             s.setTcpNoDelay(true);
             s.startHandshake();
             Conn c = new Conn("net", addr, s, s.getInputStream(), s.getOutputStream());
-            JSONObject auth = Proto.msg("auth").put("id", Pairing.myId(ctx)).put("token", Pairing.token(ctx))
-                    .put("role", role);
-            if (bulk != null) auth.put("bulk", bulk);
-            c.send(auth, null);
+            c.send(Proto.msg("auth").put("id", Pairing.myId(ctx)).put("token", Pairing.token(ctx))
+                    .put("role", role), null);
             Proto.Frame r = Proto.read(c.in);
             if (!"auth".equals(r.type()) || !r.h.optBoolean("ok")) {
                 error = "The computer didn't accept this phone. Unpair and pair again.";
                 c.close();
                 return null;
             }
-            s.setSoTimeout("control".equals(role) ? (int) NET_IDLE_MS : "audio".equals(role) ? 1000 : 60_000);
+            s.setSoTimeout("control".equals(role) ? (int) NET_IDLE_MS : 1000);
             if ("control".equals(role)) {
                 Pairing.setLastAddr(ctx, addr);
                 Pairing.setName(ctx, r.h.optString("name"));
@@ -663,6 +670,13 @@ final class Link {
                         break;
                     case "pong":
                         break;
+                    case "x":
+                        xfer.onChunk(c.via, f);
+                        break;
+                    case "x-ack":
+                    case "x-no":
+                        xfer.onAck(f.h);
+                        break;
                     case "keys": // the computer lost our record and made new keys
                         if ("bt".equals(c.via) && !f.h.optString("token").isEmpty()) {
                             Pairing.setToken(ctx, f.h.optString("token"));
@@ -715,7 +729,7 @@ final class Link {
     private void openAudio() {
         audioConnecting = true;
         new Thread(() -> {
-            Conn a = connectNet("audio", null);
+            Conn a = connectNet("audio");
             audioConnecting = false;
             if (a == null) return;
             Conn old = audio;

@@ -18,7 +18,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from tandemd.link import encode, recv_frame, recv_header  # noqa: E402
+from tandemd.link import encode, recv_frame  # noqa: E402
 
 PORT = 47911
 fails = []
@@ -50,10 +50,42 @@ def read_until(s, t, timeout=5):
     s.settimeout(timeout)
     end = time.time() + timeout
     while time.time() < end:
-        h, p = recv_frame(s, {"clip": 1 << 26, "file": 1 << 26})
+        h, p = recv_frame(s, {"clip": 1 << 16, "x": 1 << 16})
         if h.get("t") == t:
             return h, p
     raise TimeoutError(t)
+
+
+def phone_xfer(s, header, data, chunk=16384, sha=None):
+    """Sends a message as a transfer, the way the app does; the computer's last ack."""
+    sha = sha or hashlib.sha256(data).hexdigest()
+    xid = hashlib.sha256(sha.encode() + header["id"].encode()).hexdigest()[:32]
+    for off in range(0, len(data), chunk):
+        h = {"t": "x", "x": xid, "i": off}
+        if off == 0:
+            h.update(n=len(data), sha=sha, h=header)
+        send(s, h, data[off:off + chunk])
+    while True:  # an ack per chunk; then done, or "from the start" (have 0) if it came in damaged
+        h, _ = read_until(s, "x-ack")
+        if h.get("x") == xid and (h.get("done") or h.get("have") == 0):
+            return h
+
+
+def phone_take(s):
+    """Takes one transfer from the computer, acking each chunk; (its header, the payload)."""
+    buf, meta = bytearray(), None
+    while True:
+        h, p = read_until(s, "x")
+        if h["i"] == 0:
+            meta, size, sha = h["h"], h["n"], h["sha"]
+            buf = bytearray(size)
+        buf[h["i"]:h["i"] + len(p)] = p
+        end = h["i"] + len(p)
+        done = end >= size
+        send(s, {"t": "x-ack", "x": h["x"], "have": end, "done": done})
+        if done:
+            check("…and it matches its checksum", hashlib.sha256(buf).hexdigest() == sha)
+            return meta, bytes(buf)
 
 
 def main():
@@ -68,7 +100,7 @@ def main():
     with open(os.path.join(cfgdir, "phone.json"), "w") as f:
         json.dump({"id": "phone1", "name": "Test Phone", "token": "tok", "bt": "AA:BB:CC:DD:EE:FF"}, f)
     env = dict(os.environ, TANDEM_CONFIG=os.path.join(cfgdir, "config"), XDG_RUNTIME_DIR=run,
-               WAYLAND_DISPLAY="", DISPLAY="")
+               XDG_CACHE_HOME=os.path.join(tmp, "cache"), WAYLAND_DISPLAY="", DISPLAY="")
     log = open(os.path.join(tmp, "daemon.log"), "w")
     d = subprocess.Popen([os.path.join(os.path.dirname(HERE), "tandem"), "run"], env=env, stdout=log,
                          stderr=subprocess.STDOUT)
@@ -122,30 +154,26 @@ def main():
         check("the phone's battery shows in the state", (st.get("phone_battery") or {}).get("level") == 42)
         check("the state says the network link is up", st["link"]["net"] is True)
 
-        # phone -> computer file over a bulk connection
-        b, h = connect(fp, role="bulk")
+        # phone -> computer file, as a transfer on the control connection (what it does over Bluetooth too)
         data = os.urandom(300_000)
-        send(b, {"t": "file", "id": "f1", "name": "../evil/photo.jpg", "mime": "image/jpeg", "kind": "file"}, data)
-        ok = recv_header(b)
-        b.close()
-        check("a pushed file is acknowledged", ok.get("t") == "file-ok")
+        done = phone_xfer(s, {"t": "file", "id": "f1", "name": "../evil/photo.jpg", "mime": "image/jpeg",
+                              "kind": "file"}, data)
+        check("a file sent in chunks is acknowledged", done.get("done") is True and done.get("have") == len(data))
         time.sleep(0.5)
         got = os.path.join(dl, "photo.jpg")
         check("…saved under its plain name in the files folder", os.path.exists(got) and open(got, "rb").read() == data)
+        bad = phone_xfer(s, {"t": "file", "id": "f2", "name": "x.bin"}, os.urandom(70_000), sha="0" * 64)
+        check("…a damaged one is asked for again", bad.get("have") == 0 and not bad.get("done"))
 
-        # computer -> phone file: offer, the phone pulls it
+        # computer -> phone file, the same way
         src = os.path.join(tmp, "notes.txt")
         with open(src, "w") as f:
             f.write("hello phone\n" * 1000)
         c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         c.sendto(json.dumps({"op": "send-files", "paths": [src]}).encode(), os.path.join(run, "tandem.ctl"))
-        offer, _ = read_until(s, "file-offer")
-        check("`tandem send` offers the file", offer.get("name") == "notes.txt" and offer.get("size") == 12000)
-        b, h = connect(fp, role="bulk", extra={"bulk": offer["id"]})
-        fh, payload = recv_frame(b, {"file": 1 << 20})
-        send(b, {"t": "file-ok", "id": offer["id"]})
-        b.close()
-        check("…and streams it when the phone asks", payload == open(src, "rb").read())
+        meta, payload = phone_take(s)
+        check("`tandem send` sends the file in chunks", meta.get("t") == "file" and meta.get("name") == "notes.txt")
+        check("…all of it", payload == open(src, "rb").read())
 
         # computer -> phone link, and remote keys (on only when the setting is)
         c.sendto(json.dumps({"op": "open", "url": "https://example.org"}).encode(), os.path.join(run, "tandem.ctl"))
@@ -170,6 +198,7 @@ def main():
     audio_paths()
     bt_reader()
     hub_fallback()
+    transfers()
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
     sys.exit(1 if fails else 0)
 
@@ -235,7 +264,6 @@ def bt_reader():
     b.close()
 
 
-
 def hub_fallback():
     """Without the network the phone stays the hub, and the laptop takes over only while it alone plays."""
     from types import SimpleNamespace
@@ -269,6 +297,158 @@ def hub_fallback():
     hp.fallback = False
     check("the laptop as hub doesn't care", at(w, False, phone=True) == "laptop")
 
+
+class _Pipe:
+    """One link between two in-process Xfers: frames arrive in order on a thread, unless it's dropped."""
+
+    def __init__(self, via, to):
+        import queue
+        import threading
+        self.via, self.to, self.q, self.dead, self.frames = via, to, queue.Queue(), False, 0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def send(self, h, p=b""):
+        if self.dead:
+            raise OSError("closed")
+        self.frames += h.get("t") == "x"
+        self.q.put((h, p))
+
+    def _run(self):
+        while True:
+            h, p = self.q.get()
+            if self.dead:
+                continue  # in flight when it dropped: lost
+            time.sleep(0.002)  # a slow link, so there's time to break it mid-way
+            if h["t"] == "x":
+                self.to.xfer.on_chunk(self.via, h, p)
+            else:
+                self.to.xfer.on_ack(h)
+
+
+class _Side:
+    def __init__(self, folder):
+        from tandemd.xfer import Xfer
+        self.net = self.bt = None
+        self.got = []
+        self.xfer = Xfer(self, folder)
+
+    def send(self, h, payload=b""):
+        for c in (self.net, self.bt):
+            if c:
+                try:
+                    c.send(h, payload)
+                    return True
+                except OSError:
+                    pass
+        return False
+
+    def drop(self, c):
+        c.dead = True
+        if c is self.net:
+            self.net = None
+        if c is self.bt:
+            self.bt = None
+
+    def post(self, via, h, p):
+        self.got.append((via, h, p))
+
+
+def transfers():
+    """Big messages in chunks over whichever link is up (xfer.py)."""
+    import threading
+    from tandemd import xfer
+    xfer.GIVE_UP, xfer.STALL = 2.0, 1.0
+    tmp = tempfile.mkdtemp(prefix="tandem-xfer-")
+    a, b = _Side(os.path.join(tmp, "a")), _Side(os.path.join(tmp, "b"))
+
+    def link(via):
+        ab, ba = _Pipe(via, b), _Pipe(via, a)
+        setattr(a, via, ab)
+        setattr(b, via, ba)
+        return ab, ba
+
+    def cut(via):
+        for side in (a, b):
+            c = getattr(side, via)
+            if c:
+                side.drop(c)
+
+    def wait_for(cond, t=10):
+        end = time.monotonic() + t
+        while not cond() and time.monotonic() < end:
+            time.sleep(0.02)
+        return cond()
+
+    def sending(header, data, **kw):
+        out = []
+        th = threading.Thread(target=lambda: out.append(a.xfer.send(header, data, **kw)), daemon=True)
+        th.start()
+        return th, out
+
+    # Over Bluetooth, then the network comes up and Bluetooth drops mid-way: it carries on there, all of it.
+    ab, _ = link("bt")
+    data = os.urandom(400_000)
+    th, out = sending({"t": "clip", "mime": "image/png", "hash": "h1"}, data)
+    wait_for(lambda: ab.frames >= 5)
+    link("net")
+    cut("bt")
+    th.join(10)
+    check("a transfer carries on when the link changes mid-way", out == [True])
+    check("…and arrives whole, once", [(h["t"], p) for _, h, p in b.got] == [("clip", data)])
+
+    # Sound on the receiver's radio: Bluetooth chunks wait until it stops; the network doesn't.
+    cut("net")
+    ab, _ = link("bt")
+    busy = [True]
+    b.xfer.radio_busy = lambda: busy[0]
+    b.got.clear()
+    th, out = sending({"t": "clip", "mime": "image/png", "hash": "h2"}, os.urandom(300_000))
+    time.sleep(1.5)
+    held = ab.frames
+    time.sleep(1.0)
+    check("Bluetooth chunks wait while the receiver's radio plays audio", 0 < held == ab.frames and not out)
+    busy[0] = False
+    th.join(10)
+    check("…and go once it stops", out == [True] and len(b.got) == 1)
+
+    # ...and the sender's own radio.
+    a.xfer.radio_busy = lambda: True
+    th, out = sending({"t": "clip", "mime": "image/png", "hash": "h3"}, os.urandom(100_000))
+    time.sleep(1.0)
+    check("…or the sender's", not out and a.xfer.state()[0]["state"] == "waits for the audio to stop")
+    link("net")
+    th.join(10)
+    check("…but not on the network", out == [True])
+    a.xfer.radio_busy = lambda: False
+    cut("net")
+
+    # No longer wanted (a newer clipboard copy): it stops, and the receiver drops its part.
+    b.got.clear()
+    want = [True]
+    a.xfer.radio_busy = lambda: True
+    th, out = sending({"t": "clip", "mime": "image/png", "hash": "h4"}, os.urandom(200_000), wanted=lambda: want[0])
+    time.sleep(0.3)
+    a.xfer.radio_busy = lambda: False
+    wait_for(lambda: b.xfer.inc)
+    want[0] = False
+    th.join(5)
+    check("a transfer nobody wants any more stops", out == [False] and wait_for(lambda: not b.xfer.inc, 3))
+
+    # The link goes away for good: the sender gives up; sent again later, it carries on where it stopped.
+    data = os.urandom(600_000)
+    before = ab.frames
+    th, out = sending({"t": "file", "id": "f9", "name": "big.bin"}, data)
+    wait_for(lambda: ab.frames - before >= 15)
+    cut("bt")
+    th.join(10)
+    have = next(iter(b.xfer.inc.values())).have if b.xfer.inc else 0
+    check("with no link the sender gives up", out == [False] and have > 0)
+    ab, _ = link("bt")
+    th, out = sending({"t": "file", "id": "f9", "name": "big.bin"}, data)
+    th.join(15)
+    path = b.got[-1][2] if b.got else ""
+    check("…and sent again, it carries on from what arrived",
+          out == [True] and ab.frames < 600_000 // 16384 and open(path, "rb").read() == data)
 
 if __name__ == "__main__":
     main()

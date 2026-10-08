@@ -61,7 +61,7 @@ FEATURES = [
     ("Audio", [
         ("audio_share", BOTH, "Share audio through one pair of headphones",
          "With Bluetooth headphones on, they stay on one link and you hear both devices: the hub plays "
-         "the other's audio. Needs both on the same network, and PipeWire here.", []),
+         "the other's audio. Needs PipeWire here; smoothest when both are on the same network.", []),
         ("media_controls", TO_PHONE, "Control phone media from here", "Play/pause and volume, and what's playing.", []),
         ("play_opens_app", LOCAL, "Headphone play button opens the phone's music app",
          "If the app is closed, pressing play opens it. Pick the app in the phone app.", []),
@@ -676,7 +676,7 @@ class Window(Adw.ApplicationWindow):
                                  "over the network when you're on the same Wi-Fi (or Tailscale).")
             else:
                 line.set_label("Connected" if ln.get("net") else "Connected over Bluetooth")
-                detail.set_label("" if ln.get("net") else "Big files and audio wait for a shared network.")
+                detail.set_label("" if ln.get("net") else "Big files go slowly over Bluetooth, and laptop audio may stutter.")
             detail.set_visible(bool(detail.get_label()))
             b = st.get("phone_battery")
             hp = st.get("headphones")

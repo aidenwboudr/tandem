@@ -190,7 +190,7 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
         LinearLayout aGroup = group();
         LinearLayout audio = feature(aGroup, "audio_share", Look.Dir.BOTH, "Share audio through one pair of headphones",
                 "With Bluetooth headphones on, they stay on one link and you hear both devices: whichever is "
-                        + "the hub plays the other's audio. Needs both on the same network.",
+                        + "the hub plays the other's audio. Smoothest when both are on the same network.",
                 perm("Allow Bluetooth", Manifest.permission.BLUETOOTH_CONNECT));
         audio.addView(fieldLabel("Headphone name contains"));
         EditText match = Look.field(this, Prefs.match(this), InputType.TYPE_CLASS_TEXT);
@@ -461,7 +461,7 @@ public class MainActivity extends Activity implements Settings.Listener, Link.Li
                 return;
             }
             line.setText(link.net != null ? "Connected" : "Connected over Bluetooth");
-            String d = link.net == null ? "Big files and audio wait for a shared network." : "";
+            String d = link.net == null ? "Big files go slowly over Bluetooth, and laptop audio may stutter." : "";
             if (LinkService.error != null) d += (d.isEmpty() ? "" : "\n") + LinkService.error;
             detail.setText(d);
             detail.setVisibility(d.isEmpty() ? View.GONE : View.VISIBLE);

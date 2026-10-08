@@ -1,5 +1,6 @@
-"""The link with the phone: Bluetooth (RFCOMM, the phone serves) for pairing and small messages, and TLS
-over TCP (the laptop serves) for everything when the two share a network. See docs/PROTOCOL.md.
+"""The link with the phone: Bluetooth (RFCOMM, the phone serves), and TLS over TCP (the laptop serves) when
+the two share a network. Every message can go either way: the network when it's up, else Bluetooth. Big
+payloads go in chunks that carry on across a change of link (xfer.py). See docs/PROTOCOL.md.
 
 Messages from either transport are queued for the daemon's main thread (`events`), so features never run
 concurrently with each other. Sending is thread-safe.
@@ -7,6 +8,7 @@ concurrently with each other. Sending is thread-safe.
 import base64
 import hmac
 import json
+import os
 import queue
 import secrets
 import select
@@ -17,10 +19,10 @@ import threading
 import time
 
 from . import sdp
-from .config import PROTO_VERSION, SERVICE_UUID, log
+from .config import CACHE_DIR, PROTO_VERSION, SERVICE_UUID, log
+from .xfer import CHUNK_MAX, INLINE_MAX, Xfer
 
 HEADER_MAX = 64 * 1024
-BT_MAX = 4 * 1024 * 1024  # payloads bigger than this wait for the network (Bluetooth does ~100-200 KB/s)
 NET_IDLE = 90.0  # the phone pings every 25 s
 BT_PING = 20.0  # we ping over Bluetooth; an idle RFCOMM link otherwise drops after a minute or so
 # A Bluetooth read wakes this often to see whether its connection was closed meanwhile: closing an RFCOMM
@@ -30,8 +32,8 @@ PAIR_WAIT = 120.0  # how long the phone's "use Tandem with this computer?" promp
 DENY_HOLD = 3600.0  # after a "Deny" (or "paired with another computer"), leave that phone alone this long...
 MISSED_HOLD = 120.0  # ...but ask again soon if nobody answered (`tandem pair` asks right away)
 BT_RETRY_MIN, BT_RETRY_MAX = 15.0, 60.0
-# Payload limits per message type (the rest carry none). Files on a bulk connection are streamed.
-PAYLOAD_MAX = {"clip": 64 * 1024 * 1024, "art": 1 << 20, "notif-icon": 1 << 20, "file": BT_MAX}
+# Payload limits per message type (the rest carry none). Anything bigger comes as a transfer (`x` chunks).
+PAYLOAD_MAX = {"clip": INLINE_MAX, "art": INLINE_MAX, "notif-icon": INLINE_MAX, "x": CHUNK_MAX}
 NO_PAYLOAD = {}
 
 
@@ -141,10 +143,9 @@ def local_addresses():
 
 
 class Link:
-    def __init__(self, ident, peer, settings, port, notify, hooks):
+    def __init__(self, ident, peer, settings, port, notify):
         self.ident, self.peer, self.settings, self.port = ident, peer, settings, port
         self.notify = notify  # notify(text, title=...) for pairing prompts
-        self.hooks = hooks  # {"bulk": fn(conn, auth_header)} runs on the connection's own thread
         self.bt = None  # Conn
         self.net = None  # Conn, role control
         self.audio = None  # Conn, role audio
@@ -158,6 +159,7 @@ class Link:
         self.addrs = local_addresses()
         self.bt_state = "idle"  # for `tandem status`: idle, looking, connecting, pairing, linked
         self.phone_ip = None
+        self.xfer = Xfer(self, os.path.join(CACHE_DIR, "xfer"))
 
     # ------------------------------------------------------------ plumbing
     def start(self):
@@ -191,22 +193,26 @@ class Link:
     def connected(self):
         return bool(self.bt or self.net)
 
-    def send(self, header, payload=b"", via=None):
-        """Sends over the network if it's up, else Bluetooth (small payloads only). False if neither could."""
-        order = [via] if via else ["net", "bt"]
-        for v in order:
+    def send(self, header, payload=b"", via=None, path=None, wanted=None):
+        """Sends over the network if it's up, else Bluetooth. False if neither could. A payload over
+        INLINE_MAX, or a file (`path`), goes as a transfer: then it waits until the phone has all of it (call it
+        from a thread that can), and gives up early once `wanted()` says it's no longer needed. `via` pins one
+        link (laptop audio goes on both)."""
+        if path is not None or len(payload) > INLINE_MAX:
+            return self.xfer.send(header, None if path is not None else payload, path, wanted)
+        for v in [via] if via else ["net", "bt"]:
             c = self.net if v == "net" else self.bt
-            if not c or (v == "bt" and len(payload) > BT_MAX):
+            if not c:
                 continue
             try:
                 c.send(header, payload)
                 return True
             except OSError as e:
                 log(f"link: {v} send failed ({e}); dropping that connection")
-                self._drop(c)
+                self.drop(c)
         return False
 
-    def _drop(self, c):
+    def drop(self, c):
         c.close()
         if c is self.net:
             self.net = None
@@ -222,7 +228,7 @@ class Link:
             self.send({"t": "unpair"})
         for c in (self.net, self.bt, self.audio):
             if c:
-                self._drop(c)
+                self.drop(c)
         bt = self.peer.get("bt")
         if bt:
             self.denied[bt] = time.monotonic() + DENY_HOLD  # don't ask to pair again right away
@@ -288,7 +294,7 @@ class Link:
                 log(f"link: bluetooth with {name or addr}: {e}")
             conn.close()
             if self.bt is conn:
-                self._drop(conn)
+                self.drop(conn)
         if self.bt_state in ("connecting", "pairing"):
             self.bt_state = "idle"
         return False
@@ -397,13 +403,6 @@ class Link:
             if self.audio is conn:
                 self.audio = None
             return
-        if role == "bulk":
-            s.settimeout(60)
-            try:
-                self.hooks["bulk"](conn, h)
-            finally:
-                conn.close()
-            return
         self.phone_ip = ip
         self._serve(conn)
 
@@ -443,6 +442,12 @@ class Link:
                 if t == "ping":
                     conn.send({"t": "pong"})
                     continue
+                if t == "x":
+                    self.xfer.on_chunk(via, h, p)
+                    continue
+                if t in ("x-ack", "x-no"):
+                    self.xfer.on_ack(h)
+                    continue
                 if t == "unpair":
                     log("link: the phone unpaired")
                     self.notify("Your phone unpaired from this computer.", title="Tandem")
@@ -455,7 +460,7 @@ class Link:
                 log(f"link: {via} down ({e})")
         finally:
             if (self.bt if via == "bt" else self.net) is conn:
-                self._drop(conn)
+                self.drop(conn)
             else:
                 conn.close()
             if via == "bt":
@@ -489,7 +494,7 @@ class Link:
                 try:
                     c.send({"t": "ping"})
                 except OSError:
-                    self._drop(c)
+                    self.drop(c)
 
     def _addr_watch(self):
         while not self.stop:
@@ -502,4 +507,5 @@ class Link:
     def state(self):
         return {"bt": bool(self.bt), "net": bool(self.net), "audio": bool(self.audio), "bt_state": self.bt_state,
                 "paired": bool(self.peer), "phone": self.peer.get("name"), "phone_bt": self.peer.get("bt"),
-                "phone_ip": self.phone_ip if self.net else None, "addrs": self.addrs, "port": self.port}
+                "phone_ip": self.phone_ip if self.net else None, "addrs": self.addrs, "port": self.port,
+                "transfers": self.xfer.state()}
