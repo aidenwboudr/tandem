@@ -335,7 +335,7 @@ class Headphones:
     def send_ack(self):
         # "headphones": which ones the computer shares, so the phone reports those if it has several.
         self.d.link.send({"t": "ack", "owner": self.owner, "streaming": self.streamer.running(),
-                          "sent": self.streamer.sent, "prefer": self.prefer, "headphones": self.hp_mac}, via="net")
+                          "sent": self.streamer.sent, "prefer": self.prefer, "headphones": self.hp_mac})
 
     def set_prefer(self, to):
         if to == "toggle":
@@ -428,8 +428,8 @@ class Headphones:
     # -- one pass of the policy
     def tick(self, devs, now):
         self.phone_linked = False  # set below only while the laptop owns and the phone streams to it
-        net = bool(self.d.link.net)
-        hb = self.hb if net and self.hb and now - self.hb["time"] < HB_TIMEOUT else None
+        # From either link: the phone sends them over Bluetooth while the network is down.
+        hb = self.hb if self.hb and now - self.hb["time"] < HB_TIMEOUT else None
         if hb and not self.same_headphones(hb, devs):
             hb = None  # other Bluetooth audio on the phone (a car, a speaker, an intercom): none of our business
         hp = devs.get(self.hp_mac) if self.hp_mac else None
