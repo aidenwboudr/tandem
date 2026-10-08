@@ -168,6 +168,7 @@ def main():
         if fails:
             print(open(os.path.join(tmp, "daemon.log")).read())
     audio_paths()
+    bt_reader()
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
     sys.exit(1 if fails else 0)
 
@@ -197,6 +198,40 @@ def audio_paths():
     check("silence stays off Bluetooth", not audible(bytes(3840)) and not audible(array.array("h", [3] * 1920).tobytes()))
     check("…sound in either channel goes on it", audible(array.array("h", [0, 400] * 960).tobytes())
           and audible(array.array("h", [400, 0] * 960).tobytes()))
+
+
+
+def bt_reader():
+    """The Bluetooth reader must give up once its connection is closed, even if the socket says it's readable
+    and then blocks in recv (an RFCOMM socket did, after the phone app restarted mid-send)."""
+    import threading
+    from tandemd.link import recv_exact
+    a, b = socket.socketpair()
+    b.send(b"x")  # `a` stays readable
+
+    class Wedged:
+        def fileno(self):
+            return a.fileno()
+
+        def recv(self, n, flags=0):
+            if flags & socket.MSG_DONTWAIT:
+                raise BlockingIOError
+            threading.Event().wait()  # a blocking read that never returns
+
+    out = []
+
+    def read():
+        try:
+            recv_exact(Wedged(), 4, alive=lambda: False)
+        except ConnectionError:
+            out.append("gave up")
+
+    t = threading.Thread(target=read, daemon=True)
+    t.start()
+    t.join(2)
+    check("a closed Bluetooth link's reader doesn't hang in recv", out == ["gave up"])
+    a.close()
+    b.close()
 
 
 if __name__ == "__main__":

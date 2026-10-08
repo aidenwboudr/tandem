@@ -44,7 +44,17 @@ def recv_exact(sock, n, alive=None):
             while not select.select([sock], [], [], BT_WAKE)[0]:
                 if not alive():
                     raise ConnectionError("closed")
-        chunk = sock.recv(min(n - len(buf), 1 << 16))
+            # Never wait inside recv: an RFCOMM socket closed under it can poll readable and then block there
+            # for good (seen after the phone app restarted mid-send). Nothing to read yet: back to waiting.
+            try:
+                chunk = sock.recv(min(n - len(buf), 1 << 16), socket.MSG_DONTWAIT)
+            except BlockingIOError:
+                if not alive():
+                    raise ConnectionError("closed")
+                time.sleep(0.05)
+                continue
+        else:
+            chunk = sock.recv(min(n - len(buf), 1 << 16))
         if not chunk:
             raise ConnectionError("closed")
         buf += chunk
