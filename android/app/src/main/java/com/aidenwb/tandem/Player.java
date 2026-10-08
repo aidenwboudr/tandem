@@ -13,7 +13,8 @@ import java.nio.ByteOrder;
 
 /**
  * Plays the laptop's stream (48 kHz stereo s16, raw or Opus) into the headphones.
- * It never asks for audio focus, so it mixes with whatever the phone is playing.
+ * It never asks for audio focus, so it mixes with whatever the phone is playing, calls included (LinkService
+ * hands it the headphones' call channel then).
  */
 final class Player {
     static final int CODEC_PCM = 0, CODEC_OPUS = 1;
