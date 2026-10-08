@@ -26,7 +26,7 @@ cat > "$root/DEBIAN/control" <<CTRL
 Package: tandem-phone
 Version: $version
 Architecture: all
-Maintainer: Aiden Boudreau <aiden.boudr@gmail.com>
+Maintainer: Aiden Boudreau <aiden.boudreau@proton.me>
 Depends: python3, systemd, bluez, openssl, iproute2
 Recommends: python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, wl-clipboard | xclip, libglib2.0-bin, pipewire-bin, libopus0, zenity
 Suggests: scrcpy, adb
