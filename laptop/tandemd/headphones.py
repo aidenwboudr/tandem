@@ -39,6 +39,10 @@ PHONE_RETRY_MAX = 600.0  # ...doubling after each failure up to this
 # Failures that mean the bond is broken. Retrying them pops a pairing request on the phone every time.
 PHONE_AUTH_ERRORS = ("key-missing", "AuthenticationFailed", "AuthenticationRejected", "auth-failed")
 PHONE_LINK_DELAY = 8.0  # at power-on the phone may be claiming the headphones too; let it win first
+# The phone as hub needs the network: over Bluetooth alone laptop audio reaches it at 15-25 of its 50
+# frames a second, and most of the sound is lost. The network gone this long, the laptop is the hub until it's
+# been back this long (a Tailscale blip reconnects within a second or two, and a switch costs a few seconds).
+NET_FALLBACK = 10.0
 CLAIM_TIMEOUT = 30.0  # switched to the laptop but it can't reach the headphones: let the phone carry on
 UNLINK_RETRY = 10.0  # switching to the phone: how often to drop the laptop's audio link to it
 # On the phone, its audio jumped to the laptop's audio link (see `pulled` in tick): after dropping that link,
@@ -285,6 +289,10 @@ class Headphones:
         self.phone_needs_pairing = False
         self.hp_sink_id = None
         self.prefer = load_prefer()
+        self.hub = self.prefer  # who carries the audio now: `prefer`, unless the network is gone (NET_FALLBACK)
+        self.net_was, self.net_since = None, 0.0
+        self.fallback = False
+        self.net_seen = False
         self.claim_since = None  # prefer=laptop: since when the laptop has been trying to get the headphones
         self.last_unlink_try = 0.0
         self.unlink_logged = False
@@ -335,7 +343,7 @@ class Headphones:
     def send_ack(self):
         # "headphones": which ones the computer shares, so the phone reports those if it has several.
         self.d.link.send({"t": "ack", "owner": self.owner, "streaming": self.streamer.running(),
-                          "sent": self.streamer.sent, "prefer": self.prefer, "headphones": self.hp_mac})
+                          "sent": self.streamer.sent, "prefer": self.prefer, "hub": self.hub, "headphones": self.hp_mac})
 
     def set_prefer(self, to):
         if to == "toggle":
@@ -395,6 +403,29 @@ class Headphones:
         if len(sw["resumed"]) == len(RESUME_AFTER):
             self.end_switch()
 
+    def pick_hub(self, now):
+        net = bool(self.d.link.net)
+        if net != self.net_was:
+            self.net_was, self.net_since = net, now
+        self.net_seen = self.net_seen or net
+        settled = now - self.net_since > NET_FALLBACK
+        hub = self.prefer
+        # Not since this daemon started: no hand-over to the phone to take back in 10 s. Down for a moment
+        # after that: a blip, carry on. Back after an outage: give it a moment first.
+        if self.prefer == "phone" and (not net and (settled or self.fallback or not self.net_seen)
+                                       or net and self.fallback and not settled):
+            hub = "laptop"
+        fallback = hub != self.prefer and (self.fallback or settled)
+        if fallback != self.fallback:
+            self.fallback = fallback
+            if fallback:
+                log("the phone is off the network: the laptop carries the audio until it's back")
+                self.d.notify("Your phone isn't on the network, so this computer holds the headphones until "
+                              "it is (laptop audio can't get through over Bluetooth alone).", title="Headphones")
+            else:
+                log("the phone is back on the network: it carries the audio again")
+        self.hub = hub
+
     def end_switch(self):
         self.switch = None
 
@@ -438,6 +469,7 @@ class Headphones:
             self.off(devs)
             return
         ph = devs.get(self.phone_mac) if self.phone_mac else None
+        self.pick_hub(now)
         if not hb and self.hb and self.hb.get("hp") and now - self.hb["time"] < HB_LOST_GRACE \
                 and self.same_headphones(self.hb, devs):
             hb = self.hb  # quiet, but it last said it has them: hold on
@@ -446,7 +478,7 @@ class Headphones:
                 log(f"phone went quiet; still treating it as the owner for {HB_LOST_GRACE:.0f} s")
         phone_active = bool(hb and hb.get("hp"))  # the headphones are the phone's audio output
         self.phone_hp_linked = bool(hb and hb.get("hp_linked", hb.get("hp")))
-        if self.prefer == "laptop":
+        if self.hub == "laptop":
             laptop_has = bool(hp and hp["connected"] and not hp["blocked"])
             if laptop_has or self.claim_since is None:
                 self.claim_since = now
@@ -500,7 +532,7 @@ class Headphones:
             return
 
         # Switching to the laptop: keep laptop audio going through the phone until the laptop has them.
-        claiming = phone_active and self.prefer == "laptop"
+        claiming = phone_active and self.hub == "laptop"
         if self.streamer.running() and not claiming:
             log("phone let go of the headphones: stopping the stream")
             self.streamer.stop()
@@ -516,7 +548,7 @@ class Headphones:
             self.set_owner(None)
             self.hp_was_connected = False
             # After unblocking, or while switched to the laptop and the headphones are on (the phone says so).
-            claim = self.prefer == "laptop" and self.phone_hp_linked
+            claim = self.hub == "laptop" and self.phone_hp_linked
             if hp and (now < self.reconnect_until or claim) and now - self.last_hp_try > 6:
                 self.last_hp_try = now
                 self.d.bg("connect-hp", bluez.dev_call, hp["path"], "Connect")
@@ -528,7 +560,7 @@ class Headphones:
         if not self.hp_was_connected:
             self.hp_was_connected = True
             # At power-on the phone may still be claiming them; after a switch to the laptop, link it at once.
-            self.last_phone_try = now - PHONE_RETRY + (0 if self.prefer == "laptop" else PHONE_LINK_DELAY)
+            self.last_phone_try = now - PHONE_RETRY + (0 if self.hub == "laptop" else PHONE_LINK_DELAY)
             self.phone_fails = 0  # a new session: start with short retries again
             self.reconnect_until = 0.0
             self.default_to_headphones()
@@ -550,7 +582,7 @@ class Headphones:
         if self.phone_needs_pairing and ph and (ph["connected"] or not ph["paired"]):
             self.phone_needs_pairing = False  # it reconnected, or was removed to be paired again
             self.phone_fails = 0
-        if ph and ph["paired"] and self.prefer == "phone" and self.phone_hp_linked:
+        if ph and ph["paired"] and self.hub == "phone" and self.phone_hp_linked:
             # Switched to the phone and it's connected to the headphones, but its audio comes here. Drop the
             # laptop's audio link: Android falls back to the headphones, the app reports them, and the branch
             # above hands over.
@@ -639,7 +671,7 @@ class Headphones:
         st = {"owner": self.owner, "phone_has_headphones": bool(hb and hb.get("hp")),
               "streaming": self.streamer.running(), "packets_sent": self.streamer.sent,
               "packets_sent_net": self.streamer.net_path.sent, "packets_sent_bt": self.streamer.bt_path.sent,
-              "phone_linked": self.phone_linked, "phone_mac": self.phone_mac, "prefer": self.prefer,
+              "phone_linked": self.phone_linked, "phone_mac": self.phone_mac, "prefer": self.prefer, "hub": self.hub,
               "phone_hp_linked": self.phone_hp_linked, "headphones": self.hp_mac,
               "headphones_name": self.d.peer.get("headphones_name", "")}
         if hb:

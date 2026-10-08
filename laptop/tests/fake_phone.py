@@ -169,6 +169,7 @@ def main():
             print(open(os.path.join(tmp, "daemon.log")).read())
     audio_paths()
     bt_reader()
+    hub_fallback()
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
     sys.exit(1 if fails else 0)
 
@@ -232,6 +233,38 @@ def bt_reader():
     check("a closed Bluetooth link's reader doesn't hang in recv", out == ["gave up"])
     a.close()
     b.close()
+
+
+
+def hub_fallback():
+    """The phone as hub needs the network: without it for NET_FALLBACK s the laptop is the hub till it's back."""
+    from types import SimpleNamespace
+    from tandemd.headphones import NET_FALLBACK, Headphones
+    link = SimpleNamespace(net=object())
+    hp = SimpleNamespace(d=SimpleNamespace(link=link, notify=lambda *a, **k: None), prefer="phone", hub="phone",
+                         net_was=None, net_since=0.0, fallback=False, net_seen=False)
+    seen = []
+    for t, net in [(0, True), (5, False), (5 + NET_FALLBACK / 2, False), (6 + NET_FALLBACK, False),
+                   (7 + NET_FALLBACK, True), (8 + NET_FALLBACK * 1.5, True), (9 + NET_FALLBACK * 2, True)]:
+        link.net = object() if net else None
+        Headphones.pick_hub(hp, t)
+        seen.append(hp.hub)
+    check("a short network blip keeps the phone the hub", seen[:3] == ["phone"] * 3)
+    check("…a longer outage hands the audio to the laptop", seen[3:5] == ["laptop"] * 2)
+    check("…and it goes back once the network has been up a while", seen[5:] == ["laptop", "phone"])
+    hp.prefer = hp.hub = "laptop"
+    hp.fallback = False
+    link.net = None
+    Headphones.pick_hub(hp, 100)
+    check("the laptop as hub doesn't care", hp.hub == "laptop")
+    hp.prefer, hp.hub, hp.net_was, hp.net_seen = "phone", "phone", None, False  # a daemon just started
+    seen = []
+    for t, net in [(0, False), (1, False), (2, True), (3, True)]:
+        link.net = object() if net else None
+        Headphones.pick_hub(hp, t)
+        seen.append(hp.hub)
+    check("starting without the network, the laptop keeps them; once it's up, the phone at once",
+          seen == ["laptop", "laptop", "phone", "phone"])
 
 
 if __name__ == "__main__":
