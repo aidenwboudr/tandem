@@ -38,8 +38,8 @@ NO_PAYLOAD = {}
 
 
 def recv_exact(sock, n, alive=None):
-    """Reads n bytes. With `alive` (a plain socket, not TLS), it wakes every BT_WAKE seconds while waiting and
-    gives up once alive() says the connection is done."""
+    """Reads n bytes from a socket, or a Conn. With `alive` (a plain socket, not TLS), it wakes every BT_WAKE
+    seconds while waiting and gives up once alive() says the connection is done."""
     buf = bytearray()
     while len(buf) < n:
         if alive is not None:
@@ -93,19 +93,72 @@ def encode(header, payload=b""):
 
 
 class Conn:
-    """One connection, with a lock so frames from different threads never interleave."""
+    """One connection, with a lock so frames from different threads never interleave.
+
+    A TLS one is read on one thread and written on others (chunks of a transfer go out while their acks come
+    in), and OpenSSL can't do both on one connection at once: the connection broke within a second. So its
+    socket is non-blocking, and every read and write takes `io` for that one call, never while waiting."""
 
     def __init__(self, sock, via, addr):
         self.sock, self.via, self.addr = sock, via, addr
         self.lock = threading.Lock()
+        self.io = threading.Lock() if isinstance(sock, ssl.SSLSocket) else None
+        self.timeout = None
+        if self.io:
+            self.timeout = sock.gettimeout()
+            sock.setblocking(False)
         self.opened = time.monotonic()
         self.closed = False
 
+    def settimeout(self, t):
+        if self.io:
+            self.timeout = t
+        else:
+            self.sock.settimeout(t)
+
     def send(self, header, payload=b""):
         with self.lock:
-            self.sock.sendall(encode(header, payload))
+            self._sendall(encode(header, payload))
             if payload:
-                self.sock.sendall(payload)
+                self._sendall(payload)
+
+    def _sendall(self, data):
+        if not self.io:
+            self.sock.sendall(data)
+            return
+        view, deadline = memoryview(data), self._deadline()
+        while view:
+            with self.io:
+                try:
+                    view = view[self.sock.send(view):]
+                    continue
+                except (ssl.SSLWantWriteError, ssl.SSLWantReadError, BlockingIOError):
+                    pass
+            self._wait([], [self.sock], deadline)
+
+    def recv(self, n):
+        """Like socket.recv (b"" once closed), within the timeout."""
+        if not self.io:
+            return self.sock.recv(n)
+        deadline = self._deadline()
+        while True:
+            with self.io:  # read first: OpenSSL may hold decrypted bytes the socket won't show as readable
+                try:
+                    return self.sock.recv(n)
+                except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+                    pass
+            self._wait([self.sock], [], deadline)
+
+    def _deadline(self):
+        return time.monotonic() + self.timeout if self.timeout else None
+
+    def _wait(self, r, w, deadline):
+        if self.closed:
+            raise ConnectionError("closed")
+        left = 1.0 if deadline is None else deadline - time.monotonic()
+        if left <= 0:
+            raise socket.timeout("timed out")
+        select.select(r, w, [], min(left, 1.0))  # wakes now and then to notice a close
 
     def close(self):
         self.closed = True
@@ -300,7 +353,7 @@ class Link:
         return False
 
     def _bt_handshake(self, conn, addr, name):
-        conn.sock.settimeout(15)
+        conn.settimeout(15)
         conn.send({"t": "hello", "v": PROTO_VERSION, "id": self.ident.id, "name": self.ident.name,
                    "kind": "computer", "fp": self.ident.fp, "port": self.port, "addrs": self.addrs})
         h, _ = recv_frame(conn.sock, NO_PAYLOAD)
@@ -319,7 +372,7 @@ class Link:
             log(f"link: asking {h.get('name')} to pair")
             self.notify(f"Confirm on {h.get('name') or 'your phone'} to pair it with this computer.",
                         title="Tandem: pair with your phone")
-            conn.sock.settimeout(PAIR_WAIT)
+            conn.settimeout(PAIR_WAIT)
             p, _ = recv_frame(conn.sock, NO_PAYLOAD)
             if p.get("t") != "pair" or not p.get("ok"):
                 if p.get("reason") == "timeout":
@@ -395,7 +448,7 @@ class Link:
         if role == "audio":
             # A vanished phone must not hold the connection for minutes, but a network stall of a few seconds
             # mustn't end it either: reconnecting over a flaky path cut the sound for longer than the stall.
-            s.settimeout(15)
+            conn.settimeout(15)
             old, self.audio = self.audio, conn
             if old:
                 old.close()
@@ -410,7 +463,7 @@ class Link:
         """An audio connection: nothing comes back on it; just notice when it closes."""
         while not conn.closed:
             try:
-                if not conn.sock.recv(1024):
+                if not conn.recv(1024):
                     break
             except (socket.timeout, TimeoutError):
                 continue
@@ -434,10 +487,10 @@ class Link:
         try:
             conn.send(self.settings.as_message())
             conn.send({"t": "addrs", "addrs": self.addrs, "port": self.port})
-            conn.sock.settimeout(NET_IDLE if via == "net" else None)
+            conn.settimeout(NET_IDLE if via == "net" else None)
             alive = None if via == "net" else lambda: not conn.closed and not self.stop
             while not self.stop:
-                h, p = recv_frame(conn.sock, alive=alive)
+                h, p = recv_frame(conn if via == "net" else conn.sock, alive=alive)
                 t = h.get("t")
                 if t == "ping":
                     conn.send({"t": "pong"})

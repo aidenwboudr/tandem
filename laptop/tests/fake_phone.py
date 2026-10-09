@@ -168,7 +168,7 @@ def main():
         # computer -> phone file, the same way
         src = os.path.join(tmp, "notes.txt")
         with open(src, "w") as f:
-            f.write("hello phone\n" * 1000)
+            f.write("hello phone\n" * 400_000)  # 4.8 MB: many chunks, acks coming back while it sends
         c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         c.sendto(json.dumps({"op": "send-files", "paths": [src]}).encode(), os.path.join(run, "tandem.ctl"))
         meta, payload = phone_take(s)
