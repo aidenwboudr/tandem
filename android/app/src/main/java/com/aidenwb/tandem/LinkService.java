@@ -62,6 +62,7 @@ public class LinkService extends Service {
     private volatile String switchTo; // a hub switch to send with the next heartbeat
     private final Player player = new Player();
     private volatile AudioDeviceInfo hpOut;
+    private volatile AudioDeviceInfo playOut; // where the laptop's audio plays (laptopOut)
 
     static void start(Context ctx) {
         send(ctx, new Intent(ctx, LinkService.class));
@@ -224,18 +225,29 @@ public class LinkService extends Service {
     }
 
     private final Link.AudioSink sink = (codec, buf, off, len) -> {
-        AudioDeviceInfo hp = hpOut;
+        AudioDeviceInfo out = playOut;
         synchronized (player) {
-            if (codec < 0 || hp == null) {
+            if (codec < 0 || out == null) {
                 if (player.isOpen()) player.release(); // nothing playing on the computer
                 return;
             }
             packets++;
             lastAudioAt = SystemClock.elapsedRealtime();
             if (wifi != null && !wifi.isHeld()) wifi.acquire();
-            player.feed(hp, codec, buf, off, len);
+            player.feed(out, codec, buf, off, len);
         }
     };
+
+    private String callOutLogged;
+
+    /** Where the laptop's audio plays: the headphones. During a call their music channel goes silent, so it
+     *  plays into the call instead (call quality: mono, thin), and only if the call is on those headphones:
+     *  never the phone's speaker or earpiece, where the call's mic would pick it up. Ringing isn't a call yet. */
+    private static AudioDeviceInfo laptopOut(AudioManager am, AudioDeviceInfo hp, int mode) {
+        if (hp == null || mode == AudioManager.MODE_NORMAL || mode == AudioManager.MODE_RINGTONE) return hp;
+        AudioDeviceInfo c = am.getCommunicationDevice();
+        return c != null && c.getAddress().equalsIgnoreCase(hp.getAddress()) ? c : null;
+    }
 
     private void loop() {
         PowerManager pm = getSystemService(PowerManager.class);
@@ -269,6 +281,12 @@ public class LinkService extends Service {
                     lastHpCheck = now;
                     hpOut = Prefs.headphones(this);
                 }
+                AudioDeviceInfo out = laptopOut(am, hpOut, mode);
+                String where = !call || hpOut == null ? null : out == hpOut ? "the headphones"
+                        : out != null ? "the call on the headphones" : "nowhere (the call isn't on the headphones)";
+                if (where != null && !where.equals(callOutLogged)) Log.i(TAG, "call: laptop audio plays into " + where);
+                callOutLogged = where;
+                playOut = out;
                 if (now - lastLinkCheck >= 1000) {
                     lastLinkCheck = now;
                     linked = linkedHeadphones();
