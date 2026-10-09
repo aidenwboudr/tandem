@@ -39,10 +39,14 @@ PHONE_RETRY_MAX = 600.0  # ...doubling after each failure up to this
 # Failures that mean the bond is broken. Retrying them pops a pairing request on the phone every time.
 PHONE_AUTH_ERRORS = ("key-missing", "AuthenticationFailed", "AuthenticationRejected", "auth-failed")
 PHONE_LINK_DELAY = 8.0  # at power-on the phone may be claiming the headphones too; let it win first
-# The phone as hub needs the network: over Bluetooth alone laptop audio reaches it at 15-25 of its 50
-# frames a second, and most of the sound is lost. The network gone this long, the laptop is the hub until it's
-# been back this long (a Tailscale blip reconnects within a second or two, and a switch costs a few seconds).
+# Without the network neither hub is good, because the laptop's Bluetooth (an MT7922) is weak: laptop audio
+# reaches a phone hub at 15-25 of its 50 frames a second, and a laptop hub glitches the phone's audio on its
+# way through (two streams on that radio). So the phone stays the hub, and the laptop takes over only while
+# it's the one playing (for LAPTOP_PLAYS, so a ding doesn't switch) and the phone isn't, until the phone plays
+# again or the network is back. NET_FALLBACK: how long the network must be gone, or back, to count (a
+# Tailscale blip reconnects within a second or two, and a switch costs a few seconds of sound).
 NET_FALLBACK = 10.0
+LAPTOP_PLAYS = 3.0
 CLAIM_TIMEOUT = 30.0  # switched to the laptop but it can't reach the headphones: let the phone carry on
 UNLINK_RETRY = 10.0  # switching to the phone: how often to drop the laptop's audio link to it
 # On the phone, its audio jumped to the laptop's audio link (see `pulled` in tick): after dropping that link,
@@ -194,6 +198,7 @@ class Streamer:
         self.proc = None
         self.codec = None
         self.bt = False  # the phone said (hb `bta`) it takes audio frames over Bluetooth now (not during a call)
+        self.loud_since = self.loud_at = 0.0  # the laptop's sound: since when it's been playing, and last heard
         self.net_path = AudioPath("net", self._send_net)
         self.bt_path = AudioPath("bt", lambda h, p: self.link.send(h, p, via="bt"))
 
@@ -250,7 +255,14 @@ class Streamer:
                 buf = f.read(frame)
                 if not buf or len(buf) < frame:
                     break
-                loud_left = BT_HANGOVER if audible(buf) else max(0, loud_left - 1)
+                if audible(buf):
+                    loud_left = BT_HANGOVER
+                    now = time.monotonic()
+                    if now - self.loud_at > 1.5:
+                        self.loud_since = now
+                    self.loud_at = now
+                else:
+                    loud_left = max(0, loud_left - 1)
                 # Bluetooth carries Opus only: raw PCM (1.5 Mbit/s) is more than it can take.
                 net, bt = self.link.audio, self.bt and enc and loud_left and self.link.bt
                 if net or bt:
@@ -289,10 +301,9 @@ class Headphones:
         self.phone_needs_pairing = False
         self.hp_sink_id = None
         self.prefer = load_prefer()
-        self.hub = self.prefer  # who carries the audio now: `prefer`, unless the network is gone (NET_FALLBACK)
+        self.hub = self.prefer  # who carries the audio now: `prefer`, unless the network is gone (pick_hub)
         self.net_was, self.net_since = None, 0.0
         self.fallback = False
-        self.net_seen = False
         self.claim_since = None  # prefer=laptop: since when the laptop has been trying to get the headphones
         self.last_unlink_try = 0.0
         self.unlink_logged = False
@@ -407,24 +418,37 @@ class Headphones:
         net = bool(self.d.link.net)
         if net != self.net_was:
             self.net_was, self.net_since = net, now
-        self.net_seen = self.net_seen or net
         settled = now - self.net_since > NET_FALLBACK
         hub = self.prefer
-        # Not since this daemon started: no hand-over to the phone to take back in 10 s. Down for a moment
-        # after that: a blip, carry on. Back after an outage: give it a moment first.
-        if self.prefer == "phone" and (not net and (settled or self.fallback or not self.net_seen)
-                                       or net and self.fallback and not settled):
-            hub = "laptop"
-        fallback = hub != self.prefer and (self.fallback or settled)
+        if self.prefer == "phone" and not (net and settled):
+            if self.fallback:  # on the laptop for want of the network: back once the phone plays
+                hub = "phone" if self.phone_playing() else "laptop"
+            elif not net and settled and self.laptop_alone_plays(now):
+                hub = "laptop"
+        fallback = hub != self.prefer
         if fallback != self.fallback:
             self.fallback = fallback
             if fallback:
-                log("the phone is off the network: the laptop carries the audio until it's back")
-                self.d.notify("Your phone isn't on the network, so this computer holds the headphones until "
-                              "it is (laptop audio can't get through over Bluetooth alone).", title="Headphones")
+                log("no network, and only the laptop plays: the laptop carries the audio")
+                self.d.notify("Your phone isn't on the network, so this computer holds the headphones while "
+                              "only it plays (its audio can't get through to the phone over Bluetooth).",
+                              title="Headphones")
             else:
-                log("the phone is back on the network: it carries the audio again")
+                log("the phone carries the audio again (" + ("network back" if net else "it plays") + ")")
         self.hub = hub
+
+    def phone_playing(self):
+        if self.d.calls.state in ("ringing", "offhook"):
+            return True
+        hb = self.hb
+        return bool(hb) and time.monotonic() - hb["time"] < HB_LOST_GRACE \
+            and any(m.get("playing") for m in hb.get("media") or [])
+
+    def laptop_alone_plays(self, now):
+        """Has the laptop been playing for a while (it's streaming to the phone, which hears it), and the phone not?"""
+        s = self.streamer
+        return s.running() and now - s.loud_at < 1.5 and now - s.loud_since > LAPTOP_PLAYS \
+            and not self.phone_playing()
 
     def end_switch(self):
         self.switch = None
