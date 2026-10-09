@@ -20,12 +20,14 @@ talk to each other.
 1. **Pair over Bluetooth.** Pair your phone with your computer in Bluetooth settings, like any device.
    That pairing is Tandem's trust: the computer finds the Tandem app on the phone you paired, and the
    phone asks you once whether to allow it.
-2. **Bluetooth carries the small things.** These are the clipboard, notifications, calls, battery,
-   find-my-phone and keys. They keep working with no Wi-Fi at all, as long as the two are in range.
-3. **The network carries everything when it can.** When both are on the same Wi-Fi, a hotspot, or the
-   same [Tailscale](https://tailscale.com) network, the phone also connects to the computer over TLS. The
-   computer's key is pinned during Bluetooth pairing, and the phone authenticates with a secret it got
-   then. Big files and audio need this connection.
+2. **Every feature works over Bluetooth.** With no Wi-Fi at all, as long as the two are in range,
+   everything keeps working. Big files and clipboard images go in chunks (about 100 to 200 KB/s), and they
+   pause while either device plays audio over Bluetooth, so they don't make it cut out.
+3. **The network is the fast path.** When both are on the same Wi-Fi, a hotspot, or the same
+   [Tailscale](https://tailscale.com) network, the phone also connects to the computer over TLS, and
+   messages go that way first. The computer's key is pinned during Bluetooth pairing, and the phone
+   authenticates with a secret it got then. When either link drops, the other carries on, a file halfway
+   through included.
 
 Nothing else can connect: the computer only accepts the paired phone, and the phone only trusts the
 paired computer's key. The details are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -140,8 +142,8 @@ this feature on, Tandem keeps your headphones on **one** link and still lets you
 | both, **phone is the hub** (the default) | the computer drops its link; its audio goes over the network to the phone, which mixes it into the headphones |
 | both, **computer is the hub** | the computer keeps the headphones and plays the phone's audio as a Bluetooth speaker; calls still ring on the phone |
 
-Switch the hub from the app's notification, the app, or `tandem switch`. This feature needs the network
-link and PipeWire. The computer's audio arrives about 150 to 250 ms late, so video on the computer drifts
+Switch the hub from the app's notification, the app, or `tandem switch`. This feature needs PipeWire. It
+works over Bluetooth alone, but the computer's audio can stutter there; the network link is smoother. The computer's audio arrives about 150 to 250 ms late, so video on the computer drifts
 a little while the phone is the hub. Leave multipoint on in your headphones' app.
 
 The installer also stops the computer from offering phones a hands-free link
@@ -171,7 +173,8 @@ computer would pop them up on every reconnect, and so would a hub switch. `BLUEM
 ## Limits
 
 - One phone and one computer. Pairing with a different computer means unpairing first.
-- Over Bluetooth only, files up to 4 MB go through; bigger ones wait until the two share a network.
+- Over Bluetooth only, a big file takes minutes (about 100 to 200 KB/s), and it waits while either device
+  plays audio over Bluetooth. Laptop audio through the phone can stutter there.
 - Do Not Disturb sync: on Android 15 and later an app can only turn off the Do Not Disturb it turned on
   itself, so DND you switch on by hand on the phone stays on until you turn it off there.
 - Lock-on-leave uses Bluetooth range (roughly 10 m through walls), so turning Bluetooth off on the phone

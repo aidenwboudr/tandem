@@ -247,6 +247,9 @@ public class LinkService extends Service {
         BluetoothDevice linked = null;
         boolean lastHp = false;
         AudioManager am = getSystemService(AudioManager.class);
+        // Sound on this phone's radio (a call, music to the headphones or through the computer): chunks of a
+        // big transfer over Bluetooth wait for it, so they don't make it cut out.
+        link.xfer.radioBusy = () -> inCall || am.isMusicActive();
         try {
             while (!stop) {
                 long now = SystemClock.elapsedRealtime();
@@ -353,7 +356,7 @@ public class LinkService extends Service {
                     media.describe(hb);
                     for (JSONObject art : media.artPackets(hb)) {
                         byte[] jpeg = Base64.decode(art.optString("jpeg"), Base64.DEFAULT);
-                        link.sendNet(Proto.msg("art").put("key", art.optString("key")), jpeg);
+                        link.send(Proto.msg("art").put("key", art.optString("key")), jpeg);
                     }
                 } catch (RuntimeException e) { // a player's session died mid-read; skip it this beat
                     Log.w(TAG, "media", e);
@@ -382,12 +385,14 @@ public class LinkService extends Service {
             text = "Connected to " + name + " · " + via;
             int b = Status.computerBattery;
             if (b >= 0) text += " · " + b + "%" + (Status.computerCharging ? " ⚡" : "");
-        } else if (link.net == null) text = "Headphones · audio sharing needs " + name + " on the same network";
-        else if (!acked) text = name + " not answering · phone audio only";
+        } else if (!acked) text = name + " not answering · phone audio only";
         else if (!hpOn && "laptop".equals(owner)) text = name + " is the hub · phone audio plays through it";
         else if (!hpOn) text = "Phone audio isn't going to the headphones";
         else if (now - lastAudioAt < 2000) text = "Phone is the hub · playing " + name + "'s audio";
         else text = "Phone is the hub · " + name + "'s audio will play here";
+        if (linked && link.bt != null && link.net == null) text += " · over Bluetooth, it may stutter";
+        String sending = link.xfer.summary();
+        if (sending != null) text += " · " + sending;
         String key = text + "|" + (acked ? prefer : null) + "|" + linked;
         if (key.equals(shownText)) return;
         shownText = key;

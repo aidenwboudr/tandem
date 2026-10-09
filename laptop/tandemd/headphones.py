@@ -9,10 +9,9 @@ you hear both devices.
   headphones off            -> no audio is shared either way.
 
 Which of the two carries the other's audio when both could ("the hub") is a setting (`tandem switch`).
-Audio needs the network link; over Bluetooth alone the laptop leaves the headphones alone. Laptop audio
-then goes both ways at once, over the network and the Bluetooth link, and the phone plays whichever copy of
-each frame comes first: a stall on one (Tailscale moving between a relay and a direct path stops traffic
-for a few seconds) doesn't cut the sound.
+Laptop audio goes to the phone both ways at once, over the network and the Bluetooth link, and the phone
+plays whichever copy of each frame comes first: a stall on one (Tailscale moving between a relay and a direct
+path stops traffic for a few seconds) doesn't cut the sound. Bluetooth alone carries it too, less smoothly.
 """
 import array
 import collections
@@ -26,7 +25,7 @@ import threading
 import time
 
 from . import bluez, desktop
-from .config import PREFER, log
+from .config import PREFER, PROTO_VERSION, log
 
 HB_TIMEOUT = 5.0  # heartbeats arrive every 1 s while the headphones are on the phone
 # Heartbeats going quiet isn't the phone letting go: Wi-Fi drops out for a few seconds now and then.
@@ -199,6 +198,7 @@ class Streamer:
         self.codec = None
         self.bt = False  # the phone said (hb `bta`) it takes audio frames over Bluetooth now (not during a call)
         self.loud_since = self.loud_at = 0.0  # the laptop's sound: since when it's been playing, and last heard
+        self.bt_loud_at = 0.0  # when the Bluetooth link last carried a frame you could hear
         self.net_path = AudioPath("net", self._send_net)
         self.bt_path = AudioPath("bt", lambda h, p: self.link.send(h, p, via="bt"))
 
@@ -265,6 +265,8 @@ class Streamer:
                     loud_left = max(0, loud_left - 1)
                 # Bluetooth carries Opus only: raw PCM (1.5 Mbit/s) is more than it can take.
                 net, bt = self.link.audio, self.bt and enc and loud_left and self.link.bt
+                if bt:
+                    self.bt_loud_at = time.monotonic()
                 if net or bt:
                     header = {"t": "a", "c": kind, "s": seq, "id": sid}
                     payload = enc.encode(buf) if enc else buf
@@ -285,6 +287,46 @@ class Streamer:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         self.proc = None
+
+
+class Loudness:
+    """Whether a sink plays something you'd hear, from a small tap on it (8 kHz) that runs only while someone
+    keeps asking."""
+
+    IDLE = 10.0  # stop tapping after this long without a question
+
+    def __init__(self):
+        self.proc = self.sink = None
+        self.started = self.asked = self.loud_at = 0.0
+
+    def loud(self, sink):
+        now = self.asked = time.monotonic()
+        if not (self.proc and self.proc.poll() is None and self.sink == sink):
+            self.stop()
+            self.sink, self.started = sink, now
+            self.proc = subprocess.Popen(
+                ["pw-record", "--target", sink, "-P", "{ stream.capture.sink=true node.dont-reconnect=true }",
+                 "--rate", "8000", "--channels", "2", "--format", "s16", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            threading.Thread(target=self._read, args=(self.proc,), name="tandem-loudness", daemon=True).start()
+        return now - self.started < 0.5 or now - self.loud_at < 1.5  # not heard yet: assume it plays
+
+    def _read(self, proc):
+        while proc.poll() is None:
+            buf = proc.stdout.read(1600)  # 50 ms
+            if not buf:
+                break
+            if audible(buf):
+                self.loud_at = time.monotonic()
+            if time.monotonic() - self.asked > self.IDLE:
+                break
+        if proc is self.proc:
+            self.stop()
+
+    def stop(self):
+        p, self.proc = self.proc, None
+        if p and p.poll() is None:
+            p.terminate()
 
 
 # ---------------------------------------------------------------- the policy
@@ -320,6 +362,9 @@ class Headphones:
         self.switch = None  # a hub switch under way (see set_prefer)
         self.handover_at = 0.0  # when the new default sink was picked (HANDOVER_DELAY)
         self.streamer = Streamer(d.link, int(d.cfg["OPUS_BITRATE"]), "Headphones (via phone)")
+        self.loudness = Loudness()
+        self.old_app_told = False
+        self.hp_sink_name = (0.0, None)  # (when looked up, name): radio_busy asks twice a second
 
     @property
     def hp_mac(self):
@@ -345,6 +390,11 @@ class Headphones:
 
     def on_hb(self, msg):
         msg["time"] = time.monotonic()
+        if int(msg.get("v") or 0) < PROTO_VERSION and not self.old_app_told:
+            self.old_app_told = True
+            log(f"phone: its app speaks protocol {msg.get('v')}, this computer {PROTO_VERSION}")
+            self.d.notify("Update Tandem on your phone: files and big clipboard copies need the same version "
+                          "on both.", title="Tandem", timeout=15000)
         if not self.hb or self.hb.get("hp") != msg.get("hp"):
             log(f"phone: headphones {'on it' if msg.get('hp') else 'not on it'} ({msg.get('hpname', '?')})")
         self.hb = msg
@@ -450,6 +500,20 @@ class Headphones:
         return s.running() and now - s.loud_at < 1.5 and now - s.loud_since > LAPTOP_PLAYS \
             and not self.phone_playing()
 
+    def radio_busy(self):
+        """Is this computer's Bluetooth radio carrying sound you'd hear? A transfer over the Bluetooth link
+        waits for it to stop (xfer.py)."""
+        if self.streamer.running() and time.monotonic() - self.streamer.bt_loud_at < 1.5:
+            return True  # laptop audio going to the phone over Bluetooth
+        if self.owner != "laptop" or not self.hp_mac:
+            return False
+        at, name = self.hp_sink_name
+        if time.monotonic() - at > 5:
+            n = bt_node(self.hp_mac, ("Audio/Sink",))
+            name = n["name"] if n else None
+            self.hp_sink_name = (time.monotonic(), name)
+        return bool(name) and self.loudness.loud(name)
+
     def end_switch(self):
         self.switch = None
 
@@ -461,7 +525,7 @@ class Headphones:
             media = {m.get("id"): m for m in hb.get("media") or []}
             for pkg in phone_players:
                 if pkg in media and not media[pkg].get("playing") \
-                        and self.d.link.send({"t": "cmd", "op": "play", "id": pkg}, via="net"):
+                        and self.d.link.send({"t": "cmd", "op": "play", "id": pkg}):
                     resumed.append(pkg)
         if resumed:
             log("switch: resumed " + ", ".join(resumed))
@@ -686,6 +750,7 @@ class Headphones:
 
     def stop(self):
         self.streamer.stop()
+        self.loudness.stop()
         if self.loopback:
             self.loopback.terminate()
         cleanup(self.hp_mac)

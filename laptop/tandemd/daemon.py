@@ -27,9 +27,9 @@ class Daemon:
         self.settings = Settings()
         self.notifier = Notifier(cfg["NOTIFY"] == "1")
         self.files = Files(self)
-        self.link = Link(self.ident, self.peer, self.settings, int(cfg["PORT"]), self.notify,
-                         hooks={"bulk": self.files.on_bulk})
+        self.link = Link(self.ident, self.peer, self.settings, int(cfg["PORT"]), self.notify)
         self.hp = Headphones(self)
+        self.link.xfer.radio_busy = self.hp.radio_busy
         self.clip = Clipboard(self)
         self.notifs = NotifMirror(self)
         self.calls = Calls(self)
@@ -51,12 +51,11 @@ class Daemon:
             "call": lambda h, p: self.calls.on_call(h),
             "ring": lambda h, p: self.status.on_ring(h),
             "open": lambda h, p: self.files.on_open(h),
-            "file": lambda h, p: self.files.on_file(h, p) if self.settings[
-                "screenshots" if h.get("kind") == "screenshot" else "files"] else None,
+            "file": lambda h, p: self.files.on_file(h, p),
+            "file-no": lambda h, p: self.files.on_file_no(h),
             "dnd": lambda h, p: self.status.on_dnd(h),
             "pong": lambda h, p: None,
-            "_file-done": lambda h, p: self.files.received(h, h["path"]),
-            "_sent": lambda h, p: self.notify(f"{h['name']} {'sent to your phone' if h['ok'] else 'did not go through'}"),
+            "_sent": lambda h, p: self.files.on_sent(h),
             "_up": self.on_link_change,
             "_down": self.on_link_change,
             "_unpaired": lambda h, p: None,
@@ -94,7 +93,7 @@ class Daemon:
         self.status.on_link(h)
         if h["t"] == "_up":
             self.clip.on_link_up()
-            self.files.on_link_up(h.get("via"))
+            self.files.on_link_up()
 
     def on_settings(self, h):
         changed = self.settings.merge(h.get("values") or {}, h.get("rev"))
@@ -188,7 +187,6 @@ class Daemon:
             ph = devs.get((self.peer.get("bt") or "").upper())
             if ph and ph["connected"] and not self.link.bt and self.link.bt_state == "idle":
                 self.link.bt_kick.set()
-        self.files.tick(now)
         self.status.tick(now)
 
     def write_state(self):

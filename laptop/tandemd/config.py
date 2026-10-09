@@ -15,7 +15,8 @@ RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
 STATE = os.path.join(RUNTIME, "tandem.json")
 CTL = os.path.join(RUNTIME, "tandem.ctl")  # local commands (the CLI, the mixer)
 ART_DIR = os.path.join(RUNTIME, "tandem-art")
-ICON_DIR = os.path.expanduser("~/.cache/tandem/icons")
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "tandem")
+ICON_DIR = os.path.join(CACHE_DIR, "icons")
 PREFER = os.path.join(CONFIG_DIR, "prefer")  # "phone" or "laptop": who carries the audio
 IDENTITY = os.path.join(CONFIG_DIR, "identity.json")
 CERT = os.path.join(CONFIG_DIR, "cert.pem")
@@ -24,7 +25,7 @@ PEER = os.path.join(CONFIG_DIR, "phone.json")  # the paired phone
 SETTINGS = os.path.join(CONFIG_DIR, "settings.json")
 
 SERVICE_UUID = "7a6d3b40-6e1a-4d2a-9b7e-54616e64656d"
-PROTO_VERSION = 3
+PROTO_VERSION = 4
 
 # Laptop-only knobs. Everything a person would want to turn on or off lives in the app's settings
 # (DEFAULTS below), which both sides share.

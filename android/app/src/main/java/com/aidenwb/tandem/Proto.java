@@ -4,6 +4,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.DataInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -19,21 +20,25 @@ import java.util.UUID;
  */
 final class Proto {
     static final UUID SERVICE_UUID = UUID.fromString("7a6d3b40-6e1a-4d2a-9b7e-54616e64656d");
-    static final int VERSION = 3;
+    static final int VERSION = 4;
     static final int DEFAULT_PORT = 47800;
     static final int HEADER_MAX = 64 * 1024;
-    /** Payloads bigger than this wait for the network: Bluetooth does ~100-200 KB/s. */
-    static final int BT_MAX = 4 * 1024 * 1024;
 
     private Proto() {}
 
     static final class Frame {
         final JSONObject h;
         final byte[] payload;
+        final File file; // a file a transfer brought in (type "file"), instead of the payload
 
         Frame(JSONObject h, byte[] payload) {
+            this(h, payload, null);
+        }
+
+        Frame(JSONObject h, byte[] payload, File file) {
             this.h = h;
             this.payload = payload;
+            this.file = file;
         }
 
         String type() {
@@ -41,13 +46,13 @@ final class Proto {
         }
     }
 
-    /** Payload limits per message type; the rest carry none. Files on bulk connections are streamed. */
+    /** Payload limits per message type; the rest carry none. Anything bigger comes as a transfer (Xfer). */
     static int maxPayload(String type) {
         switch (type) {
             case "clip":
-                return 64 * 1024 * 1024;
-            case "file":
-                return BT_MAX;
+                return Xfer.INLINE_MAX;
+            case "x":
+                return Xfer.CHUNK_MAX;
             case "a":
                 return 64 * 1024;
             default:
@@ -109,13 +114,16 @@ final class Proto {
 
     static String sha256(byte[] data) {
         try {
-            byte[] d = MessageDigest.getInstance("SHA-256").digest(data);
-            StringBuilder sb = new StringBuilder();
-            for (byte b : d) sb.append(String.format(Locale.ROOT, "%02x", b));
-            return sb.toString();
+            return hex(MessageDigest.getInstance("SHA-256").digest(data));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    static String hex(byte[] d) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : d) sb.append(String.format(Locale.ROOT, "%02x", b));
+        return sb.toString();
     }
 
     static void copy(InputStream in, OutputStream out, long n) throws IOException {

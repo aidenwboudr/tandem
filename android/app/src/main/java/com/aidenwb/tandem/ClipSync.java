@@ -323,7 +323,15 @@ final class ClipSync {
     private String send(Pending p) {
         try {
             JSONObject h = Proto.msg("clip").put("mime", p.mime).put("hash", p.hash).put("manual", p.manual);
-            return Link.get(ctx).send(h, p.data) ? null : "not connected to " + Pairing.name(ctx);
+            Link link = Link.get(ctx);
+            if (p.data.length > Xfer.INLINE_MAX) { // an image, in chunks (minutes over Bluetooth): a newer copy replaces it
+                return link.transfer(h, Xfer.of(p.data), () -> {
+                    synchronized (lock) {
+                        return pending == p;
+                    }
+                });
+            }
+            return link.send(h, p.data) ? null : "not connected to " + Pairing.name(ctx);
         } catch (JSONException e) {
             return String.valueOf(e.getMessage());
         }

@@ -1,13 +1,16 @@
-# Tandem protocol (v3)
+# Tandem protocol (v4)
 
 One computer and one phone. Bluetooth pairing is the root of trust. The two speak the same framed
 messages over two transports:
 
-- **Bluetooth (RFCOMM).** The phone serves it, and the computer connects. It's for pairing and small
-  messages, and it works without any network.
-- **Network (TLS over TCP, port 47800).** The computer serves it, and the phone connects. It's used for
-  everything when the two share a network (same Wi-Fi, Tailscale, a hotspot), and it's the only path for
-  big things (files, laptop audio).
+- **Bluetooth (RFCOMM).** The phone serves it, and the computer connects. Pairing happens here, and it
+  works without any network.
+- **Network (TLS over TCP, port 47800).** The computer serves it, and the phone connects, when the two share
+  a network (same Wi-Fi, Tailscale, a hotspot).
+
+Every message can go over either one. A sender uses the network when it's up, else Bluetooth, and a
+feature never cares which: the link layer picks. Payloads over 64 KiB, and every file, go as a transfer
+(below), which carries on across a change of link.
 
 ## Frames
 
@@ -40,7 +43,7 @@ payload            header.len bytes (0 for most messages)
 
 - The computer listens on TCP 47800 on all its addresses, with TLS and a self-signed certificate. The
   phone checks that the certificate's SHA-256 equals the `fp` it paired with.
-- The phone's first frame is `auth {id, token, role, bulk?}`. The computer answers `auth {ok}` and closes
+- The phone's first frame is `auth {id, token, role}`. The computer answers `auth {ok}` and closes
   the connection on a mismatch. Nothing before a successful `auth` (or a finished Bluetooth hello) may carry
   a payload. The roles are:
   - `control`: all the messages below. The phone sends `ping` every 25 s, and the computer drops a
@@ -53,19 +56,40 @@ payload            header.len bytes (0 for most messages)
     over Bluetooth the phone sends a `pong` there every 2 s: Android puts a link it hasn't sent on for 7 s into
     sniff mode, which can't carry audio. When nothing has come from either link for 1.5 s, the phone opens a
     fresh audio connection (the computer drops the old one) instead of waiting out TCP's retry backoff.
-  - `bulk`: one file transfer. With `bulk: <offer id>` the phone is taking a file the computer offered
-    (`file-offer`), and the computer sends it. Without it, the phone sends one `file`. The receiver answers
-    `file-ok {id}`, or `file-no {id, error}` if it won't take it.
 - Discovery: when the phone has no working address, it broadcasts `where {id}` on UDP 47800. The computer
   answers the sender with `here {id, port}`.
 - The computer pushes `addrs {addrs}` over any link when its addresses change.
+
+## Transfers
+
+A message whose payload is over 64 KiB, and every `file`, goes as numbered chunks on whichever link is up:
+
+- `x {x, i, n?, sha?, h?}` + up to 64 KiB of the payload, starting at byte `i`. `x` is the transfer's id
+  (the same message gets the same id, so sending it again carries on). The chunk at `i: 0` also carries
+  `n` (the payload's size), `sha` (its SHA-256, hex) and `h` (the message's own header). Chunks are 64 KiB
+  on the network and 16 KiB on Bluetooth, with at most 1 MiB and 64 KiB unacknowledged.
+- `x-ack {x, have, wait?, done?}`: the receiver has every byte before `have`. Sent for every chunk, and
+  every 5 s while a transfer is idle. `have: 0` for a transfer it doesn't know means "start again from
+  0" (it lost it, or the result didn't match `sha`). `done` once it has all of it and the checksum matched.
+- `x-no {x, error}`: the receiver won't take it (too big for its type), or the sender gave up on it.
+
+When the link changes (the network comes back, or the one it was on drops), the sender goes on from the
+last `have`, on whichever link is up. Without any link for a minute it gives up, and the feature tries
+again later; the receiver keeps what it had for an hour.
+
+On Bluetooth, a transfer gives way to sound. The sender holds its chunks while its own radio carries
+audio, and the receiver answers `wait: true` while its radio does. It sends `wait: false` when that stops.
+On the computer that's sound on the headphones, or laptop audio going to the phone over Bluetooth; on
+the phone a call or any music playing.
+
+The receiver hands the rebuilt message on as if it had come in one frame. A `file` lands as a file.
 
 ## Messages
 
 | type | direction | what |
 |---|---|---|
 | `settings {values, rev}` | both | the feature settings (see below). The higher `rev` (ms since epoch) wins. Both send theirs on connect. |
-| `hb {hp, hp_linked, hpname, hpaddr, codec, bta, media, volume, media_access}` | phone → computer | headphone state and the phone's players. 1/s while the headphones are on the phone, otherwise every 15 s. Network only. |
+| `hb {hp, hp_linked, hpname, hpaddr, codec, bta, media, volume, media_access}` | phone → computer | headphone state and the phone's players. 1/s while the headphones are on the phone, otherwise every 15 s. |
 | `ack {owner, streaming, sent, prefer}` | computer → phone | reply to `hb` |
 | `switch {to}` | both | make "laptop" or "phone" the hub |
 | `cmd {op, id, value}` | computer → phone | media control (play pause toggle next previous volume) |
@@ -80,8 +104,9 @@ payload            header.len bytes (0 for most messages)
 | `call-cmd {op}` | computer → phone | `mute` (silence the ringer) or `reject` |
 | `ring {on}` | both | make the other device ring (find it) |
 | `open {url}` | both | open a link on the other device |
-| `file-offer {id, name, size, mime}` | computer → phone | the phone opens a `bulk` connection to take it |
-| `file {id, name, size, mime, kind}` + data | both, on `bulk` | `kind` is file, screenshot or photo |
+| `file {id, name, mime, kind}` + data | both, as a transfer | `kind` is file, screenshot or photo |
+| `file-no {id, name, error}` | both | the receiver didn't take a file (turned off there) |
+| `x`, `x-ack`, `x-no` | both | a transfer's chunks (see Transfers) |
 | `key {text}` / `key {key}` | computer → phone | typing into the phone (remote keyboard) |
 | `dnd {on}` | both | Do Not Disturb changed |
 | `ping` / `pong` | both | keepalive |

@@ -1,17 +1,16 @@
 """The laptop's half of the optional features. Each one checks its setting (config.DEFAULTS), which the
 phone app (or `tandem set`) turns on and off for both sides."""
+import hashlib
 import mimetypes
 import os
 import re
-import secrets
+import shutil
 import threading
 import time
 
 from . import desktop
 from .config import ICON_DIR, log, user_dir
-from .link import BT_MAX, frame_header, recv_header
 
-OFFER_TTL = 15 * 60.0
 
 
 def safe_name(name, fallback="file"):
@@ -182,9 +181,8 @@ class Calls:
 class Files:
     def __init__(self, d):
         self.d = d
-        self.offers = {}  # id -> {"path", "size", "since"}
-        self.queue = []  # paths waiting for the network (too big for Bluetooth)
-        self.lock = threading.Lock()
+        self.queue = []  # paths waiting for the phone (main thread only)
+        self.sending = threading.Lock()  # one file at a time, in order
 
     def folder(self, kind):
         if kind == "screenshot":
@@ -192,54 +190,18 @@ class Files:
         return self.d.cfg["FILES_DIR"] or user_dir("DOWNLOAD", "Downloads")
 
     # -- phone -> laptop
-    def on_file(self, h, data):
-        """A small file that came inline (over Bluetooth)."""
-        path = unique_path(self.folder(h.get("kind")), safe_name(h.get("name")))
-        with open(path, "wb") as f:
-            f.write(data)
-        self.received(h, path)
-
-    def on_bulk(self, conn, auth):
-        """A bulk connection (its own thread): the phone pushes a file, or pulls one we offered."""
-        want = auth.get("bulk")
-        if want:
-            with self.lock:
-                offer = self.offers.pop(str(want), None)
-            if not offer:
-                return
-            self._push(conn, want, offer["path"])
-            return
-        h = recv_header(conn.sock)
-        if h.get("t") != "file":
-            return
+    def on_file(self, h, path):
+        """A file from the phone, at `path` (where its transfer left it)."""
         kind = h.get("kind") or "file"
-        if (kind == "screenshot" and not self.d.settings["screenshots"]) or \
-                (kind != "screenshot" and not self.d.settings["files"]):
-            conn.send({"t": "file-no", "id": h.get("id"), "error": "turned off on the computer"})
+        if not self.d.settings["screenshots" if kind == "screenshot" else "files"]:
+            os.unlink(path)
+            self.d.link.send({"t": "file-no", "id": h.get("id"), "name": h.get("name"),
+                              "error": "turned off on the computer"})
             return
-        size = int(h.get("len") or 0)
-        path = unique_path(self.folder(kind), safe_name(h.get("name")))
-        tmp = path + ".part"
-        try:
-            with open(tmp, "wb") as f:
-                left = size
-                while left:
-                    chunk = conn.sock.recv(min(left, 1 << 16))
-                    if not chunk:
-                        raise ConnectionError("closed early")
-                    f.write(chunk)
-                    left -= len(chunk)
-            os.replace(tmp, path)
-            conn.send({"t": "file-ok", "id": h.get("id")})
-        except OSError as e:
-            log(f"files: receiving {h.get('name')} failed: {e}")
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            return
-        self.d.link.post("local", {"t": "_file-done", "path": path, "kind": kind, "name": h.get("name"),
-                                   "mime": h.get("mime")})
+        dest = unique_path(self.folder(kind), safe_name(h.get("name")))
+        shutil.move(path, dest + ".part")  # the cache may be on another disk: copy, then appear at once
+        os.replace(dest + ".part", dest)
+        self.received(h, dest)
 
     def received(self, h, path):
         kind, mime = h.get("kind") or "file", h.get("mime") or mimetypes.guess_type(path)[0] or ""
@@ -267,58 +229,41 @@ class Files:
             self._offer(p)
 
     def _offer(self, path):
-        size = os.path.getsize(path)
-        name = os.path.basename(path)
-        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        if self.d.link.net:
-            fid = secrets.token_hex(8)
-            with self.lock:
-                self.offers[fid] = {"path": path, "size": size, "since": time.monotonic()}
-            self.d.link.send({"t": "file-offer", "id": fid, "name": name, "size": size, "mime": mime}, via="net")
-            log(f"files: offered {name} ({size} bytes)")
-        elif self.d.link.bt and size <= BT_MAX:
-            def inline():  # 4 MB at Bluetooth speed takes a while; keep the main loop free
-                with open(path, "rb") as f:
-                    ok = self.d.link.send({"t": "file", "id": secrets.token_hex(8), "name": name, "mime": mime,
-                                           "kind": "file"}, f.read(), via="bt")
-                self.d.link.post("local", {"t": "_sent", "name": name, "ok": ok})
-            threading.Thread(target=inline, daemon=True).start()
-        else:
+        if not self.d.link.connected():
             self.queue.append(path)
-            self.d.notify(f"{name} will go to your phone when it's on the same network as this computer"
-                          if self.d.link.connected() else f"{name} will go to your phone when it's connected")
+            self.d.notify(f"{os.path.basename(path)} will go to your phone when it's connected")
+            return
+        threading.Thread(target=self._send, args=(path,), daemon=True).start()
 
-    def _push(self, conn, fid, path):
-        """Streams an offered file down a bulk connection the phone opened for it."""
+    def _send(self, path):
+        """Over whichever link is up (its own thread: over Bluetooth a big file takes minutes)."""
         name = os.path.basename(path)
-        try:
-            size = os.path.getsize(path)
-            header = {"t": "file", "id": fid, "name": name, "kind": "file",
-                      "mime": mimetypes.guess_type(path)[0] or "application/octet-stream"}
-            with open(path, "rb") as f:
-                conn.sock.sendall(frame_header(header, size))
-                while True:
-                    chunk = f.read(1 << 16)
-                    if not chunk:
-                        break
-                    conn.sock.sendall(chunk)
-            conn.sock.settimeout(120)
-            ok = recv_header(conn.sock).get("t") == "file-ok"
-        except (OSError, ValueError) as e:
-            log(f"files: sending {name} failed: {e}")
-            ok = False
-        self.d.link.post("local", {"t": "_sent", "name": name, "ok": ok})
+        with self.sending:
+            try:
+                st = os.stat(path)
+            except OSError:
+                return
+            # The same file keeps its id, so a send that broke off carries on where it stopped.
+            fid = hashlib.sha256(f"{path}:{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest()[:16]
+            ok = self.d.link.send({"t": "file", "id": fid, "name": name, "kind": "file",
+                                   "mime": mimetypes.guess_type(path)[0] or "application/octet-stream"}, path=path)
+        self.d.link.post("local", {"t": "_sent", "name": name, "ok": ok, "path": path})
 
-    def on_link_up(self, via):
-        if via == "net" and self.queue:
+    def on_sent(self, h):
+        if h["ok"]:
+            self.d.notify(f"{h['name']} sent to your phone")
+        else:
+            self.queue.append(h["path"])
+            self.d.notify(f"{h['name']} will go to your phone when it's connected again")
+
+    def on_file_no(self, h):
+        self.d.notify(f"{h.get('name') or 'A file'} wasn't taken: {h.get('error') or 'refused'}", title="Your phone")
+
+    def on_link_up(self):
+        if self.queue:
             q, self.queue = self.queue, []
             for p in q:
                 self._offer(p)
-
-    def tick(self, now):
-        with self.lock:
-            for fid in [k for k, v in self.offers.items() if now - v["since"] > OFFER_TTL]:
-                self.offers.pop(fid, None)
 
     def on_open(self, h):
         url = str(h.get("url") or "")

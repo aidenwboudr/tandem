@@ -71,6 +71,8 @@ def status(as_json):
               + (f" · {hb}%" if hb is not None else "") + f" · on: {st.get('owner') or 'neither'} · hub: {st.get('prefer')}")
     c = st.get("clipboard") or {}
     print(f"Clipboard: {c.get('backend') or 'no tool found'} · sent {c.get('to_phone', 0)}, received {c.get('from_phone', 0)}")
+    for t in ln.get("transfers") or []:
+        print(f"Sending:   {t['name']} · {t['sent'] * 100 // max(t['size'], 1)}% · {t['state']}")
     on = [k for k, v in st["settings"].items() if v is True]
     print("On:        " + ", ".join(on))
     return 0

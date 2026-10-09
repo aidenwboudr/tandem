@@ -244,8 +244,9 @@ class Clipboard:
                     if self.pending is p:
                         self.pending = None
                 continue
+            # A big copy (an image) goes in chunks, minutes over Bluetooth: a newer copy replaces it.
             if not self.d.link.send({"t": "clip", "mime": p["mime"], "hash": p["hash"], "manual": p["manual"]},
-                                    p["data"]):
+                                    p["data"], wanted=lambda: self.pending is p):
                 if not p.get("failed"):
                     p["failed"] = True
                     log(f"clipboard: phone not connected; retrying for {CLIP_TTL / 60:.0f} min")
