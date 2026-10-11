@@ -16,6 +16,7 @@ from .desktop import session_env
 CLIP_TTL = 15 * 60.0  # a copy the phone couldn't take (asleep, away) is retried this long
 TEXT_TYPES = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT")
 X11_POLL = 1.0
+WAYLAND_RECHECK = 30.0  # on X11, how often to look for a Wayland session that came up after we started
 
 
 def clip_hash(mime, data):
@@ -103,6 +104,7 @@ class X11:
     def __init__(self):
         self.last = None
         self.alive = True
+        self.checked = time.monotonic()
 
     @staticmethod
     def usable():
@@ -114,6 +116,12 @@ class X11:
     def changes(self):
         while self.alive:
             time.sleep(X11_POLL)
+            # The service can start before the compositor; X0 may already exist (or be stale) by then.
+            # Clips written to Xwayland's clipboard don't reach Wayland apps, so switch once it's there.
+            if time.monotonic() - self.checked > WAYLAND_RECHECK:
+                self.checked = time.monotonic()
+                if Wayland.usable():
+                    return False
             try:
                 types = self.types()
                 text = next((t for t in TEXT_TYPES if t in types), None)
@@ -184,7 +192,7 @@ class Clipboard:
                 while not self.d.stop:
                     changed = backend.changes()
                     if changed is False:
-                        break  # wl-paste exited (compositor restart): start again
+                        break  # wl-paste exited (compositor restart), or Wayland came up after X11: pick again
                     if changed:
                         self._grab()
             except (OSError, subprocess.TimeoutExpired) as e:
