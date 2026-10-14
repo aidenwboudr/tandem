@@ -302,6 +302,31 @@ def unhush_blueman():
     os.unlink(BLUEMAN_HUSHED)
 
 
+# ---------------------------------------------------------------- the lid
+
+def lid_shut():
+    """Is the lid shut with no other screen to work on (logind's LidClosed and not Docked)? Then the laptop is
+    in a bag, whether or not closing it suspended it. None if logind can't tell (no lid, no logind).
+    TANDEM_LID_FILE ("open" or "closed") stands in for the lid in tests."""
+    fake = os.environ.get("TANDEM_LID_FILE")
+    if fake:
+        try:
+            with open(fake) as f:
+                return f.read().strip() == "closed"
+        except OSError:
+            return None
+    try:
+        r = subprocess.run(["busctl", "--system", "get-property", "org.freedesktop.login1", "/org/freedesktop/login1",
+                            "org.freedesktop.login1.Manager", "LidClosed", "Docked"],
+                           capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    vals = r.stdout.split()  # "b true\nb false"
+    if r.returncode != 0 or vals[::2] != ["b", "b"]:
+        return None
+    return vals[1] == "true" and vals[3] == "false"
+
+
 # ---------------------------------------------------------------- session lock
 
 def session_id():

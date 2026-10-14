@@ -60,7 +60,8 @@ def status(as_json):
         print(f"Phone:     not paired ({ln['bt_state']}). Pair your phone with this computer over Bluetooth,")
         print("           then open Tandem on it and accept.")
         return 0
-    via = " + ".join(k for k in ("bt", "net") if ln[k]) or "not connected"
+    via = " + ".join(k for k in ("bt", "net") if ln[k]) or (
+        "lid shut: off until it opens" if st.get("asleep") else "not connected")
     print(f"Phone:     {ln['phone']} · {via.replace('bt', 'Bluetooth').replace('net', 'network ' + str(ln.get('phone_ip') or ''))}")
     b = st.get("phone_battery")
     if b:

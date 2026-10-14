@@ -212,6 +212,7 @@ class Link:
         self.addrs = local_addresses()
         self.bt_state = "idle"  # for `tandem status`: idle, looking, connecting, pairing, linked
         self.phone_ip = None
+        self.asleep = False  # the lid is shut: no link at all (set_asleep)
         self.xfer = Xfer(self, os.path.join(CACHE_DIR, "xfer"))
 
     # ------------------------------------------------------------ plumbing
@@ -288,10 +289,25 @@ class Link:
         self.peer.forget()
         self.channel.clear()
 
+    def set_asleep(self, on):
+        """The lid is shut (Daemon.check_lid): drop both links and take no new ones until it opens."""
+        self.asleep = on
+        if on:
+            for c in (self.net, self.bt, self.audio):
+                if c:
+                    self.drop(c)
+        else:
+            self.bt_kick.set()
+
     # ------------------------------------------------------------ Bluetooth
     def _bt_loop(self):
         delay = BT_RETRY_MIN
         while not self.stop:
+            if self.asleep:
+                self.bt_state = "idle"
+                self.bt_kick.wait(BT_RETRY_MIN)
+                self.bt_kick.clear()
+                continue
             ok = False
             try:
                 ok = self._bt_once()
@@ -425,6 +441,9 @@ class Link:
                 time.sleep(10)
 
     def _tls_conn(self, ctx, raw, addr):
+        if self.asleep:
+            raw.close()
+            return
         ip = addr[0].removeprefix("::ffff:")
         raw.settimeout(10)
         try:
@@ -442,6 +461,9 @@ class Link:
             ok = False
         if not ok:
             log(f"link: refused a connection from {ip} (not the paired phone)")
+            conn.close()
+            return
+        if self.asleep:  # the lid shut while it was authenticating
             conn.close()
             return
         role = h.get("role")
@@ -474,6 +496,9 @@ class Link:
     def _serve(self, conn):
         """Reads a control connection (Bluetooth or network) until it drops."""
         via = conn.via
+        if self.asleep:  # it was connecting as the lid shut
+            conn.close()
+            return
         old = self.bt if via == "bt" else self.net
         if via == "bt":
             self.bt = conn
@@ -533,7 +558,8 @@ class Link:
                         msg = json.loads(data)
                     except ValueError:
                         continue
-                    if isinstance(msg, dict) and msg.get("t") == "where" and msg.get("id") == self.ident.id:
+                    if isinstance(msg, dict) and msg.get("t") == "where" and msg.get("id") == self.ident.id \
+                            and not self.asleep:
                         s.sendto(json.dumps({"t": "here", "id": self.ident.id, "port": self.port}).encode(), addr)
             except OSError as e:
                 log(f"link: discovery: {e}")
@@ -558,7 +584,8 @@ class Link:
                 self.send({"t": "addrs", "addrs": now, "port": self.port})
 
     def state(self):
-        return {"bt": bool(self.bt), "net": bool(self.net), "audio": bool(self.audio), "bt_state": self.bt_state,
+        return {"bt": bool(self.bt), "net": bool(self.net), "audio": bool(self.audio),
+                "bt_state": "lid shut" if self.asleep else self.bt_state,
                 "paired": bool(self.peer), "phone": self.peer.get("name"), "phone_bt": self.peer.get("bt"),
                 "phone_ip": self.phone_ip if self.net else None, "addrs": self.addrs, "port": self.port,
                 "transfers": self.xfer.state()}

@@ -146,6 +146,11 @@ Switch the hub from the app's notification, the app, or `tandem switch`. This fe
 works over Bluetooth alone, but the computer's audio can stutter there; the network link is smoother. The computer's audio arrives about 150 to 250 ms late, so video on the computer drifts
 a little while the phone is the hub. Leave multipoint on in your headphones' app.
 
+With the lid shut and no other screen plugged in, the computer counts as asleep, even when closing the
+lid doesn't suspend it: Tandem drops its link to the phone and blocks the phone and the headphones in BlueZ,
+so a laptop in your bag never takes the headphones or the phone's audio. Everything comes back when the
+lid opens. `LID_SLEEP=0` in `~/.config/tandem/config` keeps it all going with the lid shut.
+
 The installer also stops the computer from offering phones a hands-free link
 (`laptop/wireplumber/51-bluez-no-handsfree-unit.conf`). When a phone opened one and it was dropped,
 Android moved all the phone's audio back to the headphones.

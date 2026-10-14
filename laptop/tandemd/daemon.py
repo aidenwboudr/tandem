@@ -13,7 +13,7 @@ from .clipboard import Clipboard
 from .config import ART_DIR, CTL, STATE, Identity, Peer, Settings, coerce, DEFAULTS, log
 from .desktop import Notifier
 from .features import Calls, Files, NotifMirror, Status
-from .headphones import Headphones, cleanup
+from .headphones import Headphones, cleanup, lid_unblock
 from .link import Link
 
 
@@ -38,6 +38,7 @@ class Daemon:
         self.bluez_owner = None
         self.last_bluez_check = 0.0
         self.last_blueman_check = 0.0
+        self.asleep = False  # the lid is shut (check_lid)
         self.handlers = {
             "hb": lambda h, p: self.hp.on_hb(h),
             "switch": lambda h, p: self.hp.set_prefer(h.get("to") or "toggle"),
@@ -175,9 +176,33 @@ class Daemon:
         self.last_blueman_check = now
         self.bg("hush-blueman", quietly, desktop.hush_blueman)
 
+    def check_lid(self):
+        """Lid shut and no other screen: the laptop is in a bag, and closing the lid doesn't always suspend it
+        (logind's HandleLidSwitch=ignore, a session that only blanks the screen). Then it stays off the phone
+        and the headphones altogether until it opens. True if that changed."""
+        shut = self.cfg["LID_SLEEP"] == "1" and desktop.lid_shut()
+        if shut is None or shut == self.asleep:
+            return False
+        self.asleep = shut
+        self.link.set_asleep(shut)
+        if shut:
+            log("lid shut: letting go of the phone and the headphones until it opens")
+        else:
+            log("lid open: back on")
+            lid_unblock()
+        return True
+
     def tick(self):
         now = time.monotonic()
         devs = bluez.devices()
+        if self.check_lid() and not self.asleep:
+            # `devs` is from before the unblock: read as "the phone let go", it would take the headphones.
+            return
+        if self.asleep:
+            if devs is not None:
+                self.hp.doze(devs)
+            self.status.bt_down_since = None  # not the phone walking off: no lock_on_leave
+            return
         if devs is not None:  # BlueZ didn't answer (busy pairing, restarting): change nothing this tick
             self.check_bluez_restart(now)
             self.quiet_blueman(now)
@@ -190,7 +215,7 @@ class Daemon:
         self.status.tick(now)
 
     def write_state(self):
-        st = {"updated": time.time(), "name": self.ident.name, "link": self.link.state(),
+        st = {"updated": time.time(), "name": self.ident.name, "link": self.link.state(), "asleep": self.asleep,
               "phone": bool(self.link.net or self.link.bt), "settings": self.settings.values,
               "clipboard": self.clip.state(), **self.hp.state(), **self.status.state()}
         try:

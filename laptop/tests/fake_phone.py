@@ -99,8 +99,11 @@ def main():
         f.write(f"PORT={PORT}\nNOTIFY=0\nFILES_DIR={dl}\n")
     with open(os.path.join(cfgdir, "phone.json"), "w") as f:
         json.dump({"id": "phone1", "name": "Test Phone", "token": "tok", "bt": "AA:BB:CC:DD:EE:FF"}, f)
+    lid = os.path.join(tmp, "lid")
+    with open(lid, "w") as f:
+        f.write("open")
     env = dict(os.environ, TANDEM_CONFIG=os.path.join(cfgdir, "config"), XDG_RUNTIME_DIR=run,
-               XDG_CACHE_HOME=os.path.join(tmp, "cache"), WAYLAND_DISPLAY="", DISPLAY="")
+               XDG_CACHE_HOME=os.path.join(tmp, "cache"), WAYLAND_DISPLAY="", DISPLAY="", TANDEM_LID_FILE=lid)
     log = open(os.path.join(tmp, "daemon.log"), "w")
     d = subprocess.Popen([os.path.join(os.path.dirname(HERE), "tandem"), "run"], env=env, stdout=log,
                          stderr=subprocess.STDOUT)
@@ -185,6 +188,30 @@ def main():
         c.sendto(json.dumps({"op": "key", "text": "hi"}).encode(), os.path.join(run, "tandem.ctl"))
         kh, _ = read_until(s, "key")
         check("`tandem type` sends keys once remote input is on", kh.get("text") == "hi")
+
+        # The lid shuts (the laptop goes in a bag): it lets go of the phone and takes no link until it opens.
+        with open(lid, "w") as f:
+            f.write("closed")
+        s.settimeout(5)
+        try:
+            dropped = s.recv(1) == b""
+        except OSError:
+            dropped = True
+        check("with the lid shut the computer drops the phone", dropped)
+        s.close()
+        try:
+            connect(fp)
+            refused = False
+        except (OSError, ssl.SSLError):
+            refused = True
+        check("…and turns it away while the lid stays shut", refused)
+        time.sleep(1.5)
+        check("…which the state says", json.load(open(os.path.join(run, "tandem.json"))).get("asleep") is True)
+        with open(lid, "w") as f:
+            f.write("open")
+        time.sleep(1.5)
+        s, h = connect(fp)
+        check("lid open: the phone is let back in", h.get("ok") is True)
 
         s.close()
         time.sleep(0.5)
