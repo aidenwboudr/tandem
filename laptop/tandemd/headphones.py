@@ -25,7 +25,7 @@ import threading
 import time
 
 from . import bluez, desktop
-from .config import PREFER, PROTO_VERSION, log
+from .config import LID_BLOCKED, PREFER, PROTO_VERSION, log, read_json, write_json
 
 HB_TIMEOUT = 5.0  # heartbeats arrive every 1 s while the headphones are on the phone
 # Heartbeats going quiet isn't the phone letting go: Wi-Fi drops out for a few seconds now and then.
@@ -544,6 +544,39 @@ class Headphones:
         self.owner = None
         self.phone_linked = False
 
+    def doze(self, devs):
+        """The lid is shut (Daemon.check_lid): give everything back, and block the headphones and the phone so
+        BlueZ turns their reconnects away until it opens. A laptop in a bag, awake because closing the lid
+        doesn't suspend it, took the headphones and the phone's audio whenever they reconnected, and the two
+        fought over them for minutes (2026-10-14)."""
+        if self.owner or self.streamer.running():
+            log("lid shut: the headphones and the phone's audio stay off this computer")
+        self.end_switch()
+        self.streamer.stop()
+        if self.loopback:
+            self.loopback.terminate()
+            self.loopback = None
+        self.owner = None  # quietly: nobody sees the screen, and "Off" would greet them when it opens
+        self.hb = None  # from before: once it opens, only what the phone says then counts
+        self.phone_linked = self.phone_hp_linked = False
+        self.hp_was_connected = self.sink_defaulted = False
+        self.claim_since = None
+        self.reconnect_until = 0.0
+        if "connect-hp" in self.d.busy or "link-phone" in self.d.busy:
+            return  # blocking a device in the middle of Connect crashes bluetoothd: once it has returned
+        before = set(read_json(LID_BLOCKED, []))
+        blocked = set(before)
+        if self.blocked_by_us:  # blocked already because the phone has them: unblock those on waking too
+            blocked.add(self.hp_mac)
+            self.blocked_by_us = False
+        todo = {mac: devs[mac] for mac in (self.hp_mac, self.phone_mac)
+                if mac in devs and not devs[mac]["blocked"]}
+        blocked.update(todo)
+        if blocked != before:
+            write_json(LID_BLOCKED, sorted(blocked))  # first: a crash must not leave them blocked for good
+        for dev in todo.values():
+            bluez.set_blocked(dev["path"], True)  # BlueZ drops it and turns its reconnects away
+
     # -- one pass of the policy
     def tick(self, devs, now):
         self.phone_linked = False  # set below only while the laptop owns and the phone streams to it
@@ -789,7 +822,27 @@ def save_prefer(v):
         log("can't save the switch setting:", e)
 
 
+def lid_unblock():
+    """Unblocks what doze blocked: the lid opened, or Tandem stopped (or crashed) while it was shut."""
+    macs = read_json(LID_BLOCKED, [])
+    if not macs:
+        return
+    devs = bluez.devices()
+    if devs is None:
+        return  # BlueZ didn't answer: the file stays for the next try
+    for mac in macs:
+        dev = devs.get(mac)
+        if dev and dev["blocked"]:
+            bluez.set_blocked(dev["path"], False)
+    log("unblocked the phone and the headphones")
+    try:
+        os.unlink(LID_BLOCKED)
+    except OSError:
+        pass
+
+
 def cleanup(hp_mac):
+    lid_unblock()
     if not hp_mac:
         return
     dev = (bluez.devices() or {}).get(hp_mac)

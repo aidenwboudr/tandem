@@ -37,7 +37,11 @@ CONFIG_DEFAULTS = {
     # 1 keeps blueman's "Connected"/"Disconnected" pop-ups, which Tandem otherwise turns off while it runs
     # (its own link to the phone would pop them up on every reconnect).
     "BLUEMAN_POPUPS": "0",
+    # 1: with the lid shut (and no other screen), Tandem lets go of the phone and the headphones and connects
+    # to neither until it opens. 0 keeps everything going in clamshell use without an external screen.
+    "LID_SLEEP": "1",
 }
+LID_BLOCKED = os.path.join(CONFIG_DIR, "lid-blocked")  # devices blocked while the lid was shut (Daemon.doze)
 
 # The feature settings. The phone app is where people change them; `tandem set` works too.
 DEFAULTS = {
