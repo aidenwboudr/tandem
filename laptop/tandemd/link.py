@@ -32,6 +32,12 @@ PAIR_WAIT = 120.0  # how long the phone's "use Tandem with this computer?" promp
 DENY_HOLD = 3600.0  # after a "Deny" (or "paired with another computer"), leave that phone alone this long...
 MISSED_HOLD = 120.0  # ...but ask again soon if nobody answered (`tandem pair` asks right away)
 BT_RETRY_MIN, BT_RETRY_MAX = 15.0, 60.0
+# A working link that drops (waking from suspend resets it) is dialed again after this, not BT_RETRY_MIN: the
+# heartbeats that say where the headphones are ride on it. Waiting 15 s after a wake (2026-10-17) meant the
+# phone started Spotify meanwhile, paging it while both it and the laptop streamed to the headphones took
+# another 15 s, and the headphones played both the whole time. At most once per BT_RETRY_MAX, so a link that
+# keeps dropping right after it comes up doesn't keep the radio paging.
+BT_REDIAL = 1.0
 # Payload limits per message type (the rest carry none). Anything bigger comes as a transfer (`x` chunks).
 PAYLOAD_MAX = {"clip": INLINE_MAX, "art": INLINE_MAX, "notif-icon": INLINE_MAX, "x": CHUNK_MAX}
 NO_PAYLOAD = {}
@@ -302,6 +308,7 @@ class Link:
     # ------------------------------------------------------------ Bluetooth
     def _bt_loop(self):
         delay = BT_RETRY_MIN
+        last_redial = -BT_RETRY_MAX
         while not self.stop:
             if self.asleep:
                 self.bt_state = "idle"
@@ -313,11 +320,16 @@ class Link:
                 ok = self._bt_once()
             except Exception as e:  # never let the loop die
                 log("link: bluetooth:", repr(e))
-            if ok:
-                delay = BT_RETRY_MIN
+            now = time.monotonic()
+            if ok and now - last_redial >= BT_RETRY_MAX:
+                last_redial = now
+                delay = BT_RETRY_MIN / 1.5  # if the redial fails, back off from BT_RETRY_MIN as usual
+                wait = BT_REDIAL
+            elif ok:
+                delay = wait = BT_RETRY_MIN
             else:
-                delay = min(delay * 1.5, BT_RETRY_MAX)
-            self.bt_kick.wait(BT_RETRY_MIN if ok else delay)
+                delay = wait = min(delay * 1.5, BT_RETRY_MAX)
+            self.bt_kick.wait(wait)
             self.bt_kick.clear()
 
     def _bt_once(self):
