@@ -135,6 +135,7 @@ class Daemon:
             log("unpaired")
         elif op == "pair":
             self.link.denied.clear()
+            self.link.bond_broken.clear()
             self.link.bt_kick.set()
         elif op in ("play", "pause", "toggle", "next", "previous", "volume"):
             if self.settings["media_controls"]:
@@ -206,6 +207,7 @@ class Daemon:
         if devs is not None:  # BlueZ didn't answer (busy pairing, restarting): change nothing this tick
             self.check_bluez_restart(now)
             self.quiet_blueman(now)
+            self.link.bond_check(devs)  # before hp.tick, which may drop the audio link that shows a good key
             self.hp.tick(devs, now)
             self.hp.check_switch(now)
             # The phone just connected over Bluetooth for something else: link up now, not on the next retry.
