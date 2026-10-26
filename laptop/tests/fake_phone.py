@@ -224,6 +224,7 @@ def main():
             print(open(os.path.join(tmp, "daemon.log")).read())
     audio_paths()
     bt_reader()
+    broken_bond()
     hub_fallback()
     transfers()
     print(f"\n{len(fails)} failed" if fails else "\nall passed")
@@ -289,6 +290,61 @@ def bt_reader():
     check("a closed Bluetooth link's reader doesn't hang in recv", out == ["gave up"])
     a.close()
     b.close()
+
+
+def broken_bond():
+    """A phone that turns down our Bluetooth key (EACCES) is dialed once, then left alone (every dial asked
+    both devices to pair) until BlueZ shows the pairing changed."""
+    import errno
+    from types import SimpleNamespace
+    from tandemd import link as link_mod
+    from tandemd.headphones import Headphones
+    addr = "E8:D5:2B:4B:2A:07"
+    dials, notes = [], []
+
+    class Refused:
+        def __init__(self, *a):
+            pass
+
+        def settimeout(self, t):
+            pass
+
+        def connect(self, where):
+            dials.append(where)
+            raise OSError(errno.EACCES, "Permission denied")
+
+        def close(self):
+            pass
+
+    class Peer(dict):
+        __bool__ = lambda self: True
+
+    real_socket, real_xfer, real_addrs = link_mod.socket, link_mod.Xfer, link_mod.local_addresses
+    link_mod.socket = SimpleNamespace(socket=Refused, AF_BLUETOOTH=31, SOCK_STREAM=1, BTPROTO_RFCOMM=3,
+                                      socketpair=real_socket.socketpair)
+    link_mod.Xfer = lambda *a: SimpleNamespace(state=list)  # not the real cache folder: it clears partials
+    link_mod.local_addresses = lambda: []
+    try:
+        ln = link_mod.Link(SimpleNamespace(), Peer(bt=addr, name="Pixel"), None, 0,
+                           lambda text, **kw: notes.append(text))
+        ln.channel[addr] = 3
+        ln._bt_once()
+        ln._bt_once()
+    finally:
+        link_mod.socket, link_mod.Xfer, link_mod.local_addresses = real_socket, real_xfer, real_addrs
+    check("a phone that turns down our key is dialed once, not again", len(dials) == 1)
+    check("…says so once, and in `tandem status`", len(notes) == 1 and ln.state()["bt_state"] == "pairing broken")
+    hp = SimpleNamespace(phone_mac=addr, d=SimpleNamespace(link=ln))
+    check("…and the audio link leaves it alone too", Headphones.phone_needs_pairing.fget(hp))
+    dev = {"paired": True, "connected": True, "transport": False}
+    ln.bond_check({addr: dev})
+    check("connecting alone (a pairing pop-up does) doesn't count as fixed", addr in ln.bond_broken)
+    ln.bond_check({addr: dict(dev, transport=True)})
+    check("an audio link (a working key) clears it", not ln.bond_broken and ln.bt_kick.is_set()
+          and ln.state()["bt_state"] == "idle")
+    ln.bond_lost(addr)
+    ln.bond_check({})
+    check("…so does BlueZ forgetting the phone (removed, to pair again)", not ln.bond_broken)
 
 
 def hub_fallback():

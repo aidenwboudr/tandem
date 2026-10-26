@@ -6,6 +6,7 @@ Messages from either transport are queued for the daemon's main thread (`events`
 concurrently with each other. Sending is thread-safe.
 """
 import base64
+import errno
 import hmac
 import json
 import os
@@ -38,6 +39,11 @@ BT_RETRY_MIN, BT_RETRY_MAX = 15.0, 60.0
 # another 15 s, and the headphones played both the whole time. At most once per BT_RETRY_MAX, so a link that
 # keeps dropping right after it comes up doesn't keep the radio paging.
 BT_REDIAL = 1.0
+# A dial that fails with EACCES means the phone turned down this computer's Bluetooth key: the two no longer
+# share a pairing (from 2026-10-22 the phone did that to every dial). Dialing it again can't work, and the
+# audio link's tries asked both devices to pair again, a pop-up on each, every 10 minutes all day. So
+# nothing dials that phone until the pairing changes (bond_check) or `tandem pair` asks for one more try.
+BOND_BROKEN = "pairing broken"  # bt_state while that's so
 # Payload limits per message type (the rest carry none). Anything bigger comes as a transfer (`x` chunks).
 PAYLOAD_MAX = {"clip": INLINE_MAX, "art": INLINE_MAX, "notif-icon": INLINE_MAX, "x": CHUNK_MAX}
 NO_PAYLOAD = {}
@@ -214,6 +220,7 @@ class Link:
         self.stop = False
         self.bt_kick = threading.Event()
         self.denied = {}  # bt address -> monotonic time to leave it alone until
+        self.bond_broken = set()  # bt addresses (upper case) that turned down our key: see BOND_BROKEN
         self.channel = {}  # bt address -> RFCOMM channel (from SDP)
         self.addrs = local_addresses()
         self.bt_state = "idle"  # for `tandem status`: idle, looking, connecting, pairing, linked
@@ -341,11 +348,13 @@ class Link:
         now = time.monotonic()
         if self.peer and self.peer.get("bt"):
             cands = [(self.peer.get("bt"), self.peer.get("name"))]
-            cands = [c for c in cands if self.denied.get(c[0], 0) < now]
+            cands = [c for c in cands if self.denied.get(c[0], 0) < now and c[0].upper() not in self.bond_broken]
         else:
             from .bluez import bonded_phones
-            cands = [(a, n) for a, n in bonded_phones() if self.denied.get(a, 0) < now]
-            self.bt_state = "looking" if cands else "no phone paired over Bluetooth"
+            phones = [(a, n) for a, n in bonded_phones() if a.upper() not in self.bond_broken]
+            cands = [(a, n) for a, n in phones if self.denied.get(a, 0) < now]
+            self.bt_state = "looking" if cands else BOND_BROKEN if self.bond_broken and not phones else \
+                "no phone paired over Bluetooth"
         for addr, name in cands:
             ch = self.channel.get(addr)
             if ch is None:
@@ -365,6 +374,8 @@ class Link:
                 s.close()
                 self.channel.pop(addr, None)  # the app may have restarted on another channel
                 log(f"link: bluetooth connect to {name or addr} failed: {e}")
+                if e.errno == errno.EACCES:
+                    self.bond_lost(addr)
                 continue
             conn = Conn(s, "bt", addr)
             try:
@@ -379,6 +390,31 @@ class Link:
         if self.bt_state in ("connecting", "pairing"):
             self.bt_state = "idle"
         return False
+
+    def bond_lost(self, addr):
+        """A dial to `addr` failed authentication (see BOND_BROKEN). Also from the audio link (headphones)."""
+        addr = addr.upper()
+        if addr in self.bond_broken:
+            return
+        self.bond_broken.add(addr)
+        self.bt_state = BOND_BROKEN
+        log(f"link: {addr} turned down this computer's Bluetooth key: not dialing it until they're paired again")
+        self.notify("The phone no longer accepts this computer's Bluetooth key, so Tandem stopped connecting over "
+                    "Bluetooth (each try asked both to pair). The network link still works. To fix it, remove each "
+                    "from the other's Bluetooth settings, then pair them again.",
+                    title="Tandem: Bluetooth pairing broken", timeout=30000)
+
+    def bond_check(self, devs):
+        """Dial a phone again once its pairing has changed: BlueZ dropped it (removed, to be paired again) or
+        it has an audio link here (which takes a working key). From the daemon's tick, with bluez.devices()."""
+        for addr in list(self.bond_broken):
+            d = devs.get(addr)
+            if d is None or not d["paired"] or d["transport"]:
+                self.bond_broken.discard(addr)
+                log(f"link: {addr}'s pairing changed: dialing it again")
+                if not self.bond_broken and self.bt_state == BOND_BROKEN:
+                    self.bt_state = "idle"
+                self.bt_kick.set()
 
     def _bt_handshake(self, conn, addr, name):
         conn.settimeout(15)
