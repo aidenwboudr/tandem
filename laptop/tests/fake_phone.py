@@ -344,7 +344,10 @@ def broken_bond():
           and ln.state()["bt_state"] == "idle")
     ln.bond_lost(addr)
     ln.bond_check({})
-    check("…so does BlueZ forgetting the phone (removed, to pair again)", not ln.bond_broken)
+    ln.bond_check({addr: dict(dev, paired=False)})
+    check("removed, to pair again: still left alone (a dial would ask both to pair)", addr in ln.bond_broken)
+    ln.bond_check({addr: dev})
+    check("…until it's paired again", not ln.bond_broken)
 
 
 def hub_fallback():

@@ -220,7 +220,8 @@ class Link:
         self.stop = False
         self.bt_kick = threading.Event()
         self.denied = {}  # bt address -> monotonic time to leave it alone until
-        self.bond_broken = set()  # bt addresses (upper case) that turned down our key: see BOND_BROKEN
+        # bt address (upper case) that turned down our key -> BlueZ has had it unpaired since: see BOND_BROKEN
+        self.bond_broken = {}
         self.channel = {}  # bt address -> RFCOMM channel (from SDP)
         self.addrs = local_addresses()
         self.bt_state = "idle"  # for `tandem status`: idle, looking, connecting, pairing, linked
@@ -396,7 +397,7 @@ class Link:
         addr = addr.upper()
         if addr in self.bond_broken:
             return
-        self.bond_broken.add(addr)
+        self.bond_broken[addr] = False
         self.bt_state = BOND_BROKEN
         log(f"link: {addr} turned down this computer's Bluetooth key: not dialing it until they're paired again")
         self.notify("The phone no longer accepts this computer's Bluetooth key, so Tandem stopped connecting over "
@@ -405,13 +406,16 @@ class Link:
                     title="Tandem: Bluetooth pairing broken", timeout=30000)
 
     def bond_check(self, devs):
-        """Dial a phone again once its pairing has changed: BlueZ dropped it (removed, to be paired again) or
-        it has an audio link here (which takes a working key). From the daemon's tick, with bluez.devices()."""
-        for addr in list(self.bond_broken):
+        """Dial a phone again once it's paired anew: BlueZ dropped it (removed, to be paired again) and has it
+        paired again, or it has an audio link here (which takes a working key). Not while it's unpaired: a dial
+        then asks both to pair, the pop-ups this is about. From the daemon's tick, with bluez.devices()."""
+        for addr, unpaired in list(self.bond_broken.items()):
             d = devs.get(addr)
-            if d is None or not d["paired"] or d["transport"]:
-                self.bond_broken.discard(addr)
-                log(f"link: {addr}'s pairing changed: dialing it again")
+            if d is None or not d["paired"]:
+                self.bond_broken[addr] = True
+            elif unpaired or d["transport"]:
+                self.bond_broken.pop(addr, None)
+                log(f"link: {addr} is paired again: dialing it")
                 if not self.bond_broken and self.bt_state == BOND_BROKEN:
                     self.bt_state = "idle"
                 self.bt_kick.set()
