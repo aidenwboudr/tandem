@@ -401,7 +401,7 @@ class Link:
         self.bt_state = BOND_BROKEN
         log(f"link: {addr} turned down this computer's Bluetooth key: not dialing it until they're paired again")
         self.notify("The phone no longer accepts this computer's Bluetooth key, so Tandem stopped connecting over "
-                    "Bluetooth (each try asked both to pair). The network link still works. To fix it, remove each "
+                    "Bluetooth (each try asked both to pair). It can still connect over the network. To fix it, remove each "
                     "from the other's Bluetooth settings, then pair them again.",
                     title="Tandem: Bluetooth pairing broken", timeout=30000)
 
