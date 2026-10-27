@@ -63,6 +63,7 @@ public class LinkService extends Service {
     private final Player player = new Player();
     private volatile AudioDeviceInfo hpOut;
     private volatile AudioDeviceInfo playOut; // where the laptop's audio plays (laptopOut)
+    private volatile boolean playIntoCall; // playOut is the call's channel: only sound you'd hear goes there
 
     static void start(Context ctx) {
         send(ctx, new Intent(ctx, LinkService.class));
@@ -226,6 +227,7 @@ public class LinkService extends Service {
 
     private final Link.AudioSink sink = (codec, buf, off, len) -> {
         AudioDeviceInfo out = playOut;
+        boolean intoCall = playIntoCall;
         synchronized (player) {
             if (codec < 0 || out == null) {
                 if (player.isOpen()) player.release(); // nothing playing on the computer
@@ -234,7 +236,7 @@ public class LinkService extends Service {
             packets++;
             lastAudioAt = SystemClock.elapsedRealtime();
             if (wifi != null && !wifi.isHeld()) wifi.acquire();
-            player.feed(out, codec, buf, off, len);
+            player.feed(out, intoCall, codec, buf, off, len);
         }
     };
 
@@ -286,6 +288,7 @@ public class LinkService extends Service {
                         : out != null ? "the call on the headphones" : "nowhere (the call isn't on the headphones)";
                 if (where != null && !where.equals(callOutLogged)) Log.i(TAG, "call: laptop audio plays into " + where);
                 callOutLogged = where;
+                playIntoCall = out != null && out != hpOut;
                 playOut = out;
                 if (now - lastLinkCheck >= 1000) {
                     lastLinkCheck = now;

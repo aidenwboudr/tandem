@@ -23,15 +23,25 @@ final class Player {
     // target: it fills to this before playing, and non-blocking writes past it are dropped.
     private static final int TARGET_FRAMES = RATE * 120 / 1000;
 
+    // In a call's channel a stream is only welcome while there's something to hear: the call has that link
+    // to itself otherwise (an app holding a stream open on the laptop streams silence all day).
+    private static final long CALL_QUIET_MS = 1500;
+
     private AudioTrack track;
+    private AudioDeviceInfo out;
+    private boolean audibleOnly;
+    private long loudAt;
     private int deviceId = -1;
     private MediaCodec opus;
     private long ptsUs;
     private byte[] pcm = new byte[960 * FRAME_BYTES * 2];
     long dropped;
 
-    void feed(AudioDeviceInfo out, int codec, byte[] buf, int off, int len) {
-        if (track == null || out.getId() != deviceId) open(out);
+    /** {@code audibleOnly}: it's the call's channel, so silence closes the track (CALL_QUIET_MS). */
+    void feed(AudioDeviceInfo out, boolean audibleOnly, int codec, byte[] buf, int off, int len) {
+        this.out = out;
+        this.audibleOnly = audibleOnly;
+        if (track != null && out.getId() != deviceId) closeTrack();
         if (codec == CODEC_PCM) {
             write(buf, off, len);
         } else if (codec == CODEC_OPUS) {
@@ -40,7 +50,7 @@ final class Player {
     }
 
     private void open(AudioDeviceInfo out) {
-        release();
+        closeTrack();
         int min = AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
         track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
@@ -63,7 +73,13 @@ final class Player {
     }
 
     private void write(byte[] b, int off, int len) {
-        if (audible(b, off, len)) LinkService.lastLoudAt = SystemClock.elapsedRealtime();
+        long now = SystemClock.elapsedRealtime();
+        if (audible(b, off, len)) LinkService.lastLoudAt = loudAt = now;
+        if (audibleOnly && now - loudAt > CALL_QUIET_MS) {
+            closeTrack();
+            return;
+        }
+        if (track == null) open(out);
         int n = track.write(b, off, len, AudioTrack.WRITE_NON_BLOCKING);
         if (n < len) dropped++; // buffer full: the laptop is ahead, drop to hold latency down
     }
@@ -155,11 +171,15 @@ final class Player {
     }
 
     boolean isOpen() {
-        return track != null;
+        return track != null || opus != null;
     }
 
     void release() {
         releaseOpus();
+        closeTrack();
+    }
+
+    private void closeTrack() {
         if (track != null) {
             try {
                 track.pause();
