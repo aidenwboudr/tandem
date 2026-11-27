@@ -299,7 +299,7 @@ def broken_bond():
     from types import SimpleNamespace
     from tandemd import link as link_mod
     from tandemd.headphones import Headphones
-    addr = "E8:D5:2B:4B:2A:07"
+    addr = "AA:BB:CC:00:11:22"
     dials, notes = [], []
 
     class Refused:
