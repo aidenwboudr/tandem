@@ -592,6 +592,8 @@ class Window(Adw.ApplicationWindow):
                 "connecting": "Found a phone. Connecting…",
                 "pairing": "Waiting for you to tap Allow on the phone.",
                 "no phone paired over Bluetooth": "No phone is paired with this computer over Bluetooth yet.",
+                "pairing broken": "The phone turns down this computer's Bluetooth key. Remove each from the other's "
+                                  "Bluetooth settings, then pair them again.",
             }.get(s, s.capitalize()))
             bt.set_visible(bluetooth_settings_cmd() is not None)
         self.refreshers.append(refresh)
@@ -677,6 +679,9 @@ class Window(Adw.ApplicationWindow):
             else:
                 line.set_label("Connected" if ln.get("net") else "Connected over Bluetooth")
                 detail.set_label("" if ln.get("net") else "Big files go slowly over Bluetooth, and laptop audio may stutter.")
+            if ln.get("bt_state") == "pairing broken":
+                detail.set_label("The Bluetooth pairing is broken: the phone turns down this computer's key. Remove "
+                                 "each from the other's Bluetooth settings, then pair them again.")
             detail.set_visible(bool(detail.get_label()))
             b = st.get("phone_battery")
             hp = st.get("headphones")

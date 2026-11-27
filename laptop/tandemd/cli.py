@@ -63,6 +63,9 @@ def status(as_json):
     via = " + ".join(k for k in ("bt", "net") if ln[k]) or (
         "lid shut: off until it opens" if st.get("asleep") else "not connected")
     print(f"Phone:     {ln['phone']} · {via.replace('bt', 'Bluetooth').replace('net', 'network ' + str(ln.get('phone_ip') or ''))}")
+    if ln["bt_state"] == "pairing broken":
+        print("Bluetooth: pairing broken (the phone turns down this computer's key). Remove each from the other's")
+        print("           Bluetooth settings, then pair them again.")
     b = st.get("phone_battery")
     if b:
         print(f"Battery:   {b['level']}%{' (charging)' if b.get('charging') else ''}")

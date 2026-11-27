@@ -35,7 +35,9 @@ HB_LOST_GRACE = 20.0
 RECONNECT_WINDOW = 25.0  # after unblocking, keep asking the headphones to come back this long
 PHONE_RETRY = 30.0  # how often to try linking the phone as a source while the laptop owns...
 PHONE_RETRY_MAX = 600.0  # ...doubling after each failure up to this
-# Failures that mean the bond is broken. Retrying them pops a pairing request on the phone every time.
+# Failures that mean the bond is broken. Retrying them pops a pairing request on the phone every time. Often
+# the call times out first (BlueZ holds it while the pairing pop-ups wait for an answer), so the link's
+# Bluetooth dial is what usually notices (Link.bond_lost).
 PHONE_AUTH_ERRORS = ("key-missing", "AuthenticationFailed", "AuthenticationRejected", "auth-failed")
 PHONE_LINK_DELAY = 8.0  # at power-on the phone may be claiming the headphones too; let it win first
 # Without the network neither hub is good, because the laptop's Bluetooth (an MT7922) is weak: laptop audio
@@ -340,7 +342,6 @@ class Headphones:
         self.last_hp_try = 0.0
         self.last_phone_try = 0.0
         self.phone_fails = 0
-        self.phone_needs_pairing = False
         self.hp_sink_id = None
         self.prefer = load_prefer()
         self.hub = self.prefer  # who carries the audio now: `prefer`, unless the network is gone (pick_hub)
@@ -387,6 +388,11 @@ class Headphones:
     @property
     def phone_mac(self):
         return self.d.cfg["PHONE"] or (self.d.peer.get("bt") or "").upper()
+
+    @property
+    def phone_needs_pairing(self):
+        """The phone turned down the laptop's Bluetooth key (Link.bond_lost): linking its audio can't work."""
+        return bool(self.phone_mac) and self.phone_mac.upper() in self.d.link.bond_broken
 
     def on_hb(self, msg):
         msg["time"] = time.monotonic()
@@ -700,9 +706,8 @@ class Headphones:
             # Only once the streams have followed the default to the headphones (see HANDOVER_DELAY).
             log("the laptop has the headphones: stopping the stream to the phone")
             self.streamer.stop()
-        if self.phone_needs_pairing and ph and (ph["connected"] or not ph["paired"]):
-            self.phone_needs_pairing = False  # it reconnected, or was removed to be paired again
-            self.phone_fails = 0
+        if self.phone_needs_pairing:
+            self.phone_fails = 0  # once they're paired again, no backoff left over from before
         if ph and ph["paired"] and self.hub == "phone" and self.phone_hp_linked:
             # Switched to the phone and it's connected to the headphones, but its audio comes here. Drop the
             # laptop's audio link: Android falls back to the headphones, the app reports them, and the branch
@@ -739,10 +744,7 @@ class Headphones:
         if not ok:
             self.phone_fails += 1
             if any(e in msg for e in PHONE_AUTH_ERRORS):
-                self.phone_needs_pairing = True
-                log("the phone no longer has the laptop's pairing key: not retrying until they're paired again")
-                self.d.notify("The phone forgot this computer. Remove it in Bluetooth settings and pair again "
-                              "to hear phone audio here.", timeout=15000, title="Headphones")
+                self.d.link.bond_lost(self.phone_mac)
         else:
             self.phone_fails = 0
             log("phone linked: its audio now plays through the laptop")
